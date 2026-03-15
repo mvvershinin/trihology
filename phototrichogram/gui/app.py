@@ -1,0 +1,600 @@
+"""
+Главное окно приложения Phototrichogram.
+
+Содержит класс App(tk.Tk) — корневое окно с вкладками (ttk.Notebook),
+меню, статусбаром и глобальными хоткеями.
+
+Принимает Config и передаёт его во вкладки.
+"""
+
+from __future__ import annotations
+
+import logging
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+from typing import TYPE_CHECKING
+
+from phototrichogram.data.database import Database
+from phototrichogram.data.models import Patient
+from phototrichogram.gui.widgets import StatusBar
+
+if TYPE_CHECKING:
+    from phototrichogram.utils.config import Config
+
+logger = logging.getLogger(__name__)
+
+
+class App(tk.Tk):
+    """Главное окно приложения Фототрихограмма.
+
+    Содержит:
+    - ttk.Notebook с вкладками (Захват, Анализ, Калибровка)
+    - Строку меню (Файл, Настройки, Помощь)
+    - StatusBar внизу окна
+    - Глобальные хоткеи
+
+    Пример использования::
+
+        from phototrichogram.utils.config import load_config
+        config = load_config()
+        app = App(config=config)
+        app.run()
+    """
+
+    def __init__(self, config: Config | None = None) -> None:
+        """Инициализация главного окна.
+
+        Args:
+            config: Конфигурация приложения. Если None — используются значения
+                    по умолчанию.
+        """
+        super().__init__()
+
+        # Загрузка конфига по умолчанию при необходимости
+        if config is None:
+            from phototrichogram.utils.config import Config as ConfigClass
+            self._config = ConfigClass()
+        else:
+            self._config = config
+
+        # База данных — один экземпляр на всё приложение
+        self._db = Database(Path(self._config.app.db_path))
+
+        # Активный пациент (выбранный на вкладке «Пациенты»)
+        self._active_patient: Patient | None = None
+
+        self._setup_window()
+        self._setup_style()
+        self._create_menu()
+        self._create_statusbar()
+        self._create_notebook()
+        self._setup_hotkeys()
+        self._setup_close_handler()
+
+        logger.info("Главное окно инициализировано")
+
+    @property
+    def config(self) -> Config:
+        """Текущая конфигурация приложения."""
+        return self._config
+
+    @property
+    def status_bar(self) -> StatusBar:
+        """Статусбар приложения — для обновления статуса из вкладок."""
+        return self._status_bar
+
+    @property
+    def db(self) -> Database:
+        """Экземпляр базы данных приложения."""
+        return self._db
+
+    @property
+    def active_patient(self) -> Patient | None:
+        """Текущий активный пациент или None."""
+        return self._active_patient
+
+    @active_patient.setter
+    def active_patient(self, patient: Patient | None) -> None:
+        """Установить активного пациента.
+
+        Обновляет статусбар и уведомляет вкладку истории.
+
+        Args:
+            patient: Объект Patient или None для сброса.
+        """
+        self._active_patient = patient
+        if patient is not None:
+            self._status_bar.set_ready(f"Пациент: {patient.name}")
+            logger.info("Активный пациент: id=%d %s", patient.id, patient.name)
+        else:
+            self._status_bar.set_text("Пациент не выбран")
+            logger.info("Активный пациент сброшен")
+
+    def run(self) -> None:
+        """Запуск главного цикла событий (mainloop)."""
+        logger.info("Запуск главного цикла GUI")
+        self.mainloop()
+
+    # ──────────────────────────── Настройка окна ─────────────────────────────
+
+    def _setup_window(self) -> None:
+        """Настройка параметров окна."""
+        self.title("Фототрихограмма v1.0")
+
+        width = self._config.app.window_width
+        height = self._config.app.window_height
+
+        # Центрирование окна на экране
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.minsize(800, 600)
+
+        # Растягиваемость
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+    def _setup_style(self) -> None:
+        """Настройка темы и стилей ttk."""
+        style = ttk.Style(self)
+
+        # Тема из конфига (по умолчанию 'clam')
+        theme = self._config.app.theme
+        available_themes = style.theme_names()
+        if theme in available_themes:
+            style.theme_use(theme)
+            logger.debug("Тема ttk: %s", theme)
+        else:
+            logger.warning(
+                "Тема '%s' недоступна, доступные: %s",
+                theme,
+                ", ".join(available_themes),
+            )
+
+        # Пользовательские стили
+        style.configure("Header.TLabel", font=("", 12, "bold"))
+        style.configure("Result.TLabel", font=("", 10))
+        style.configure("Value.TLabel", font=("", 11, "bold"))
+
+    # ──────────────────────────── Меню ────────────────────────────────────────
+
+    def _create_menu(self) -> None:
+        """Создание строки меню."""
+        self._menubar = tk.Menu(self)
+        self.configure(menu=self._menubar)
+
+        # Файл
+        file_menu = tk.Menu(self._menubar, tearoff=0)
+        file_menu.add_command(
+            label="Открыть изображение...",
+            accelerator="Ctrl+O",
+            command=self._on_open_image,
+        )
+        file_menu.add_command(
+            label="Сохранить результат...",
+            accelerator="Ctrl+S",
+            command=self._on_save_result,
+        )
+        file_menu.add_separator()
+        file_menu.add_command(
+            label="Выход",
+            accelerator="Ctrl+Q",
+            command=self._on_close,
+        )
+        self._menubar.add_cascade(label="Файл", menu=file_menu)
+
+        # Настройки
+        settings_menu = tk.Menu(self._menubar, tearoff=0)
+        settings_menu.add_command(
+            label="Калибровка",
+            command=self._on_goto_calibration,
+        )
+        settings_menu.add_command(
+            label="Параметры анализа...",
+            command=self._on_open_settings,
+        )
+        self._menubar.add_cascade(label="Настройки", menu=settings_menu)
+
+        # Помощь
+        help_menu = tk.Menu(self._menubar, tearoff=0)
+        help_menu.add_command(
+            label="О программе",
+            command=self._on_about,
+        )
+        self._menubar.add_cascade(label="Помощь", menu=help_menu)
+
+    # ──────────────────────────── Вкладки ─────────────────────────────────────
+
+    def _create_notebook(self) -> None:
+        """Создание ttk.Notebook с вкладками."""
+        self._notebook = ttk.Notebook(self)
+        self._notebook.grid(row=0, column=0, sticky="nsew", padx=2, pady=(2, 0))
+
+        # Скрывать тултипы при переключении вкладок
+        self._notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        # Импорт вкладок (ленивый — чтобы не падало если модуль ещё не создан)
+        self._tabs: dict[str, ttk.Frame] = {}
+
+        self._create_tab(
+            "patients",
+            "Пациенты",
+            "phototrichogram.gui.patients_tab",
+            "PatientsTab",
+        )
+        self._create_tab(
+            "capture",
+            "Захват",
+            "phototrichogram.gui.capture_tab",
+            "CaptureTab",
+        )
+        self._create_tab(
+            "analysis",
+            "Анализ",
+            "phototrichogram.gui.analysis_tab",
+            "AnalysisTab",
+        )
+        self._create_tab(
+            "results",
+            "Результаты",
+            "phototrichogram.gui.multizone_tab",
+            "MultizoneTab",
+        )
+        self._create_tab(
+            "history",
+            "История",
+            "phototrichogram.gui.history_tab",
+            "HistoryTab",
+        )
+        self._create_tab(
+            "calibration",
+            "Калибровка",
+            "phototrichogram.gui.calibration_tab",
+            "CalibrationTab",
+        )
+
+    def _create_tab(
+        self,
+        key: str,
+        title: str,
+        module_name: str,
+        class_name: str,
+    ) -> None:
+        """Создание одной вкладки через динамический импорт.
+
+        Args:
+            key: Ключ вкладки для внутреннего словаря.
+            title: Заголовок вкладки (на русском).
+            module_name: Полное имя модуля.
+            class_name: Имя класса вкладки.
+        """
+        try:
+            import importlib
+            module = importlib.import_module(module_name)
+            tab_class = getattr(module, class_name)
+            tab = tab_class(self._notebook, app=self)
+            self._notebook.add(tab, text=title)
+            self._tabs[key] = tab
+            logger.debug("Вкладка '%s' создана", title)
+        except (ImportError, AttributeError) as e:
+            # Вкладка ещё не реализована — добавляем заглушку
+            placeholder = ttk.Frame(self._notebook)
+            ttk.Label(
+                placeholder,
+                text=f"Вкладка «{title}» в разработке",
+                style="Header.TLabel",
+            ).pack(expand=True)
+            self._notebook.add(placeholder, text=title)
+            logger.warning("Не удалось загрузить вкладку '%s': %s", title, e)
+
+    # ──────────────────────────── Статусбар ────────────────────────────────────
+
+    def _create_statusbar(self) -> None:
+        """Создание статусбара внизу окна."""
+        self._status_bar = StatusBar(self)
+        self._status_bar.grid(row=1, column=0, sticky="ew")
+        self._status_bar.set_ready()
+
+    def _on_tab_changed(self, event: object) -> None:
+        """Обработка переключения вкладок — уничтожить тултипы, обновить данные."""
+        # Уничтожить все Toplevel-тултипы (overrideredirect окна без заголовка)
+        for widget in self.winfo_children():
+            if isinstance(widget, tk.Toplevel):
+                try:
+                    if widget.wm_overrideredirect():
+                        widget.destroy()
+                except tk.TclError:
+                    pass
+
+        # Автообновление вкладки истории при переключении на неё
+        current_tab = self._get_current_tab()
+        if current_tab is not None and hasattr(current_tab, "on_tab_selected"):
+            current_tab.on_tab_selected()
+
+    # ──────────────────────────── Хоткеи ──────────────────────────────────────
+
+    def _setup_hotkeys(self) -> None:
+        """Настройка глобальных горячих клавиш."""
+        self.bind("<Control-o>", lambda e: self._on_open_image())
+        self.bind("<Control-O>", lambda e: self._on_open_image())
+        self.bind("<Control-s>", lambda e: self._on_save_result())
+        self.bind("<Control-S>", lambda e: self._on_save_result())
+        self.bind("<Control-q>", lambda e: self._on_close())
+        self.bind("<Control-Q>", lambda e: self._on_close())
+
+    def _setup_close_handler(self) -> None:
+        """Настройка подтверждения при закрытии окна."""
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ──────────────────────────── Обработчики ─────────────────────────────────
+
+    def _on_open_image(self) -> None:
+        """Открытие изображения через диалог файлов."""
+        filetypes = [
+            ("Изображения", "*.png *.jpg *.jpeg *.bmp *.tiff *.tif"),
+            ("Все файлы", "*.*"),
+        ]
+        path = filedialog.askopenfilename(
+            title="Открыть изображение",
+            filetypes=filetypes,
+        )
+        if path:
+            # Передать изображение во вкладку анализа если она доступна
+            analysis_tab = self._tabs.get("analysis")
+            if analysis_tab is not None and hasattr(analysis_tab, "load_image_from_path"):
+                analysis_tab.load_image_from_path(path)
+                self._notebook.select(analysis_tab)
+                self._status_bar.set_ready(f"Загружено: {path}")
+            else:
+                self._status_bar.set_text(f"Файл выбран: {path}")
+
+    def _on_save_result(self) -> None:
+        """Сохранение результата анализа."""
+        # Делегировать в текущую активную вкладку
+        current_tab = self._get_current_tab()
+        if current_tab is not None and hasattr(current_tab, "save_result"):
+            current_tab.save_result()
+        else:
+            self._status_bar.set_text("Нет данных для сохранения")
+
+    def _on_goto_calibration(self) -> None:
+        """Переключение на вкладку калибровки."""
+        calibration_tab = self._tabs.get("calibration")
+        if calibration_tab is not None:
+            self._notebook.select(calibration_tab)
+
+    def _on_open_settings(self) -> None:
+        """Открытие окна настроек параметров анализа."""
+        _SettingsDialog(self, self._config)
+
+    def _on_about(self) -> None:
+        """Показать окно 'О программе'."""
+        messagebox.showinfo(
+            "О программе",
+            "Фототрихограмма v1.0\n\n"
+            "Десктопное приложение для\n"
+            "трихоскопического анализа волос\n"
+            "с USB-микроскопа.\n\n"
+            "Python 3.10+ | tkinter | OpenCV\n\n"
+            "Лицензия: MIT\n\n"
+            "Результаты анализа являются вспомогательными\n"
+            "и не заменяют консультацию специалиста.",
+        )
+
+    def _on_close(self) -> None:
+        """Подтверждение закрытия приложения."""
+        confirm = messagebox.askyesno(
+            "Выход",
+            "Вы действительно хотите выйти?",
+        )
+        if confirm:
+            # Освобождение ресурсов камеры после подтверждения
+            capture_tab = self._tabs.get("capture")
+            if capture_tab is not None and hasattr(capture_tab, "release_camera"):
+                capture_tab.release_camera()
+
+            # Закрытие базы данных
+            try:
+                self._db.close()
+                logger.info("База данных закрыта")
+            except Exception as e:
+                logger.warning("Ошибка закрытия БД: %s", e)
+
+            logger.info("Пользователь подтвердил выход")
+            self.destroy()
+
+    def get_tab(self, key: str) -> ttk.Frame | None:
+        """Получить вкладку по ключу.
+
+        Args:
+            key: Ключ вкладки ('capture', 'analysis', 'calibration').
+
+        Returns:
+            Виджет вкладки или None.
+        """
+        return self._tabs.get(key)
+
+    def select_tab(self, key: str) -> None:
+        """Переключить на вкладку по ключу.
+
+        Args:
+            key: Ключ вкладки.
+        """
+        tab = self._tabs.get(key)
+        if tab is not None:
+            self._notebook.select(tab)
+
+    def navigate_to_results(self, zone_results: dict) -> None:
+        """Переключиться на вкладку результатов и загрузить данные.
+
+        Вызывается из capture_tab после завершения мультизонального анализа.
+
+        Args:
+            zone_results: Словарь {код_зоны: AnalysisResult}.
+        """
+        results_tab = self._tabs.get("results")
+        if results_tab is not None and hasattr(results_tab, "load_results"):
+            results_tab.load_results(zone_results)
+            self._notebook.select(results_tab)
+            self._status_bar.set_ready(
+                f"Результаты мультизонального анализа: {len(zone_results)} зон",
+            )
+        else:
+            self._status_bar.set_error("Вкладка результатов недоступна")
+            logger.warning("Вкладка результатов не найдена или не поддерживает load_results")
+
+    def _get_current_tab(self) -> ttk.Frame | None:
+        """Получить текущую активную вкладку.
+
+        Returns:
+            Текущая вкладка или None.
+        """
+        try:
+            current = self._notebook.select()
+            for key, tab in self._tabs.items():
+                if str(tab) == str(current):
+                    return tab
+        except tk.TclError:
+            pass
+        return None
+
+
+class _SettingsDialog(tk.Toplevel):
+    """Диалог настроек параметров анализа.
+
+    Позволяет изменить основные параметры AnalysisConfig
+    и сохранить их в файл конфигурации.
+    """
+
+    def __init__(self, parent: App, config: Config) -> None:
+        """Инициализация диалога настроек.
+
+        Args:
+            parent: Родительское окно.
+            config: Текущая конфигурация.
+        """
+        super().__init__(parent)
+        self.title("Параметры анализа")
+        self.geometry("450x500")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._parent = parent
+        self._config = config
+        self._vars: dict[str, tk.Variable] = {}
+
+        self._create_widgets()
+        self._load_values()
+
+    def _create_widgets(self) -> None:
+        """Создание виджетов диалога."""
+        main_frame = ttk.Frame(self, padding=10)
+        main_frame.pack(fill="both", expand=True)
+
+        # Калибровка
+        cal_frame = ttk.LabelFrame(main_frame, text="Калибровка", padding=5)
+        cal_frame.pack(fill="x", pady=(0, 10))
+
+        self._add_field(cal_frame, "um_per_px", "Масштаб (мкм/px):", 0, "double")
+        self._add_field(cal_frame, "fov_width_px", "Ширина кадра (px):", 1, "int")
+        self._add_field(cal_frame, "fov_height_px", "Высота кадра (px):", 2, "int")
+
+        # Сегментация
+        seg_frame = ttk.LabelFrame(main_frame, text="Сегментация", padding=5)
+        seg_frame.pack(fill="x", pady=(0, 10))
+
+        self._add_field(seg_frame, "clahe_clip_limit", "CLAHE clip limit:", 0, "double")
+        self._add_field(seg_frame, "median_blur_kernel", "Медианный фильтр:", 1, "int")
+        self._add_field(seg_frame, "morph_kernel_size", "Ядро морфологии:", 2, "int")
+
+        # Детекция
+        det_frame = ttk.LabelFrame(main_frame, text="Детекция", padding=5)
+        det_frame.pack(fill="x", pady=(0, 10))
+
+        self._add_field(det_frame, "min_hair_area", "Мин. площадь (px^2):", 0, "int")
+        self._add_field(det_frame, "max_circularity", "Макс. циркулярность:", 1, "double")
+
+        # Классификация
+        cls_frame = ttk.LabelFrame(main_frame, text="Классификация", padding=5)
+        cls_frame.pack(fill="x", pady=(0, 10))
+
+        self._add_field(cls_frame, "vellus_threshold_um", "Порог Vellus (мкм):", 0, "double")
+        self._add_field(
+            cls_frame, "intermediate_threshold_um", "Порог Terminal (мкм):", 1, "double",
+        )
+
+        # Кнопки
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill="x", pady=(10, 0))
+
+        ttk.Button(
+            btn_frame, text="Сохранить", command=self._on_save,
+        ).pack(side="right", padx=(5, 0))
+        ttk.Button(
+            btn_frame, text="Отмена", command=self.destroy,
+        ).pack(side="right")
+
+    def _add_field(
+        self,
+        parent: ttk.Widget,
+        key: str,
+        label: str,
+        row: int,
+        var_type: str,
+    ) -> None:
+        """Добавить поле настройки.
+
+        Args:
+            parent: Родительский фрейм.
+            key: Ключ параметра в AnalysisConfig.
+            label: Подпись поля (на русском).
+            row: Номер строки в grid.
+            var_type: Тип переменной ('int', 'double', 'string').
+        """
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=5, pady=2)
+
+        if var_type == "int":
+            var = tk.IntVar()
+        elif var_type == "double":
+            var = tk.DoubleVar()
+        else:
+            var = tk.StringVar()
+
+        entry = ttk.Entry(parent, textvariable=var, width=15)
+        entry.grid(row=row, column=1, sticky="e", padx=5, pady=2)
+        self._vars[key] = var
+
+    def _load_values(self) -> None:
+        """Загрузка текущих значений из конфигурации."""
+        analysis = self._config.analysis
+        for key, var in self._vars.items():
+            value = getattr(analysis, key, None)
+            if value is not None:
+                var.set(value)
+
+    def _on_save(self) -> None:
+        """Сохранение настроек."""
+        try:
+            analysis = self._config.analysis
+            for key, var in self._vars.items():
+                value = var.get()
+                setattr(analysis, key, value)
+
+            # Валидация критических параметров
+            if analysis.um_per_px <= 0:
+                self._parent.status_bar.set_error("Масштаб (мкм/px) должен быть > 0")
+                return
+
+            from phototrichogram.utils.config import save_config
+            save_config(self._config)
+
+            self._parent.status_bar.set_ready("Настройки сохранены")
+            logger.info("Настройки анализа сохранены")
+            self.destroy()
+        except (tk.TclError, ValueError, OSError) as e:
+            logger.error("Ошибка сохранения настроек: %s", e)
+            self._parent.status_bar.set_error(f"Ошибка сохранения: {e}")

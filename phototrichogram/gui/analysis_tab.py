@@ -1,0 +1,477 @@
+"""
+Вкладка анализа трихоскопического снимка.
+
+Содержит AnalysisTab — загрузка/отображение изображения, запуск анализа,
+отображение результатов (таблица + гистограмма толщин).
+
+Тяжёлые операции (анализ) выполняются в отдельном потоке
+с возвратом в GUI через after().
+
+НЕ импортирует cv2. Использует core.analyzer и utils.image_utils.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, ttk
+from typing import TYPE_CHECKING, Any
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+
+import numpy as np
+
+from phototrichogram.gui.widgets import ImageCanvas, ImageFileDialog, ToolTip
+
+if TYPE_CHECKING:
+    from phototrichogram.core.analyzer import AnalysisResult
+    from phototrichogram.gui.app import App
+
+logger = logging.getLogger(__name__)
+
+
+class AnalysisTab(ttk.Frame):
+    """Вкладка анализа трихоскопического снимка.
+
+    Содержит:
+    - Слева: исходное/аннотированное изображение (переключение)
+    - Справа: результаты анализа
+        - Плотность (волос/см^2)
+        - Terminal / Vellus / Intermediate количество и %
+        - T/V ratio
+        - Статистика толщины (mean, median, std, min, max)
+        - Гистограмма толщины (matplotlib)
+    - Кнопки: Загрузить, Анализировать, Экспорт
+    - Прогрессбар при анализе
+    """
+
+    def __init__(self, parent: tk.Widget, app: App, **kwargs: object) -> None:
+        """Инициализация вкладки анализа.
+
+        Args:
+            parent: Родительский виджет (Notebook).
+            app: Ссылка на главное окно.
+            **kwargs: Аргументы ttk.Frame.
+        """
+        super().__init__(parent, **kwargs)
+        self._app = app
+        self._current_image: np.ndarray | None = None
+        self._analysis_result: AnalysisResult | None = None
+        self._showing_annotated = False
+
+        self._create_widgets()
+        logger.info("Вкладка анализа инициализирована")
+
+    # ──────────────────────────── Создание виджетов ───────────────────────────
+
+    def _create_widgets(self) -> None:
+        """Создание всех виджетов вкладки."""
+        self.grid_columnconfigure(0, weight=3)
+        self.grid_columnconfigure(1, weight=2)
+        self.grid_rowconfigure(0, weight=1)
+
+        self._create_image_panel()
+        self._create_results_panel()
+
+    def _create_image_panel(self) -> None:
+        """Создание панели изображения (слева)."""
+        left_frame = ttk.Frame(self)
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=(5, 2), pady=5)
+        left_frame.grid_rowconfigure(1, weight=1)
+        left_frame.grid_columnconfigure(0, weight=1)
+
+        # Панель кнопок сверху
+        btn_frame = ttk.Frame(left_frame)
+        btn_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+
+        self._load_btn = ttk.Button(
+            btn_frame, text="Загрузить изображение...", command=self._on_load_image,
+        )
+        self._load_btn.pack(side="left", padx=(0, 5))
+        ToolTip(self._load_btn, "Загрузить снимок из файла")
+
+        self._analyze_btn = ttk.Button(
+            btn_frame, text="Анализировать", command=self._on_analyze, state="disabled",
+        )
+        self._analyze_btn.pack(side="left", padx=(0, 5))
+        ToolTip(self._analyze_btn, "Запустить анализ загруженного изображения")
+
+        self._toggle_btn = ttk.Button(
+            btn_frame,
+            text="Показать разметку",
+            command=self._on_toggle_view,
+            state="disabled",
+        )
+        self._toggle_btn.pack(side="left", padx=(0, 5))
+        ToolTip(self._toggle_btn, "Переключение: исходное / с аннотацией")
+
+        self._export_btn = ttk.Button(
+            btn_frame, text="Экспорт...", command=self._on_export, state="disabled",
+        )
+        self._export_btn.pack(side="right")
+        ToolTip(self._export_btn, "Сохранить аннотированное изображение")
+
+        # Канвас изображения
+        self._image_canvas = ImageCanvas(left_frame, width=640, height=480)
+        self._image_canvas.grid(row=1, column=0, sticky="nsew")
+
+        # Прогрессбар
+        self._progress = ttk.Progressbar(left_frame, mode="indeterminate")
+        self._progress.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+        self._progress.grid_remove()  # Скрыт по умолчанию
+
+    def _create_results_panel(self) -> None:
+        """Создание панели результатов (справа)."""
+        right_frame = ttk.Frame(self)
+        right_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 5), pady=5)
+        right_frame.grid_rowconfigure(1, weight=1)
+        right_frame.grid_columnconfigure(0, weight=1)
+
+        # Таблица результатов
+        results_frame = ttk.LabelFrame(right_frame, text="Результаты анализа", padding=10)
+        results_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
+        results_frame.grid_columnconfigure(1, weight=1)
+
+        self._result_vars: dict[str, tk.StringVar] = {}
+        fields = [
+            ("density", "Плотность (волос/см^2):"),
+            ("hair_count", "Всего волос:"),
+            ("sep1", "---"),
+            ("terminal", "Terminal:"),
+            ("vellus", "Vellus:"),
+            ("intermediate", "Intermediate:"),
+            ("tv_ratio", "T/V соотношение:"),
+            ("sep2", "---"),
+            ("mean_thickness", "Средняя толщина (мкм):"),
+            ("median_thickness", "Медиана толщины (мкм):"),
+            ("std_thickness", "Ст. откл. толщины (мкм):"),
+            ("min_thickness", "Мин. толщина (мкм):"),
+            ("max_thickness", "Макс. толщина (мкм):"),
+            ("sep3", "---"),
+            ("fov_area", "Площадь поля (мм^2):"),
+        ]
+
+        for row, (key, label) in enumerate(fields):
+            if key.startswith("sep"):
+                ttk.Separator(results_frame, orient="horizontal").grid(
+                    row=row, column=0, columnspan=2, sticky="ew", pady=3,
+                )
+                continue
+
+            ttk.Label(results_frame, text=label).grid(
+                row=row, column=0, sticky="w", pady=1,
+            )
+            var = tk.StringVar(value="--")
+            self._result_vars[key] = var
+            ttk.Label(
+                results_frame, textvariable=var, style="Value.TLabel",
+            ).grid(row=row, column=1, sticky="e", pady=1)
+
+        # Гистограмма толщин (matplotlib)
+        chart_frame = ttk.LabelFrame(right_frame, text="Гистограмма толщин", padding=5)
+        chart_frame.grid(row=1, column=0, sticky="nsew")
+        chart_frame.grid_rowconfigure(0, weight=1)
+        chart_frame.grid_columnconfigure(0, weight=1)
+
+        self._figure = Figure(figsize=(4, 3), dpi=80)
+        self._ax = self._figure.add_subplot(111)
+        self._figure.tight_layout(pad=2.0)
+
+        self._chart_canvas = FigureCanvasTkAgg(self._figure, master=chart_frame)
+        self._chart_widget = self._chart_canvas.get_tk_widget()
+        self._chart_widget.grid(row=0, column=0, sticky="nsew")
+
+        self._draw_empty_histogram()
+
+    # ──────────────────────────── Загрузка изображений ────────────────────────
+
+    def _on_load_image(self) -> None:
+        """Загрузить изображение из файла через диалог с превью."""
+        dialog = ImageFileDialog(self, title="Открыть изображение")
+        path = dialog.show()
+        if path is not None:
+            self.load_image_from_path(path)
+
+    def load_image_from_path(self, path: str | Path) -> None:
+        """Загрузить изображение по пути (вызывается из меню и capture_tab).
+
+        Args:
+            path: Путь к файлу изображения.
+        """
+        from phototrichogram.utils.image_utils import load_image
+
+        image = load_image(path)
+        if image is not None:
+            self._set_image(image)
+            self._app.status_bar.set_ready(f"Изображение загружено: {Path(path).name}")
+        else:
+            self._app.status_bar.set_error(f"Не удалось загрузить: {path}")
+
+    def load_image_from_array(self, image: np.ndarray) -> None:
+        """Загрузить изображение из numpy массива (из capture_tab).
+
+        Args:
+            image: BGR numpy array.
+        """
+        self._set_image(image.copy())
+        self._app.status_bar.set_ready("Изображение загружено из захвата")
+
+    def _set_image(self, image: np.ndarray) -> None:
+        """Установить текущее изображение и обновить UI.
+
+        Args:
+            image: BGR numpy array.
+        """
+        self._current_image = image
+        self._analysis_result = None
+        self._showing_annotated = False
+
+        self._image_canvas.show_numpy(image)
+        self._analyze_btn.config(state="normal")
+        self._toggle_btn.config(state="disabled")
+        self._export_btn.config(state="disabled")
+        self._clear_results()
+
+    # ──────────────────────────── Анализ ──────────────────────────────────────
+
+    def _on_analyze(self) -> None:
+        """Запуск анализа в отдельном потоке."""
+        if self._current_image is None:
+            return
+
+        # Блокировка UI на время анализа
+        self._analyze_btn.config(state="disabled")
+        self._load_btn.config(state="disabled")
+        self._progress.grid()
+        self._progress.start(10)
+        self._app.status_bar.set_busy("Анализ изображения...")
+
+        # Копия изображения для потокобезопасности
+        image_copy = self._current_image.copy()
+
+        def do_analysis() -> None:
+            """Анализ в отдельном потоке."""
+            try:
+                from phototrichogram.core.analyzer import Analyzer
+
+                analyzer = Analyzer(self._app.config.analysis)
+                result = analyzer.analyze_with_annotation(image_copy)
+
+                # Возврат в GUI-поток
+                self.after(0, lambda: self._on_analysis_complete(result))
+            except Exception as e:
+                logger.error("Ошибка анализа: %s", e)
+                self.after(0, lambda: self._on_analysis_error(str(e)))
+
+        threading.Thread(target=do_analysis, daemon=True).start()
+
+    def _on_analysis_complete(self, result: AnalysisResult | None) -> None:
+        """Обработка завершения анализа (в GUI-потоке).
+
+        Args:
+            result: Результат анализа или None при ошибке.
+        """
+        self._progress.stop()
+        self._progress.grid_remove()
+        self._analyze_btn.config(state="normal")
+        self._load_btn.config(state="normal")
+
+        if result is None:
+            self._app.status_bar.set_error("Анализ не дал результатов")
+            return
+
+        self._analysis_result = result
+        self._display_results(result)
+        self._draw_histogram(result)
+
+        self._toggle_btn.config(state="normal")
+        self._export_btn.config(state="normal")
+
+        self._app.status_bar.set_ready(
+            f"Анализ завершён: {result.hair_count} волос, "
+            f"плотность {result.density_per_cm2:.0f}/см^2",
+        )
+
+    def _on_analysis_error(self, error_msg: str) -> None:
+        """Обработка ошибки анализа (в GUI-потоке).
+
+        Args:
+            error_msg: Текст ошибки.
+        """
+        self._progress.stop()
+        self._progress.grid_remove()
+        self._analyze_btn.config(state="normal")
+        self._load_btn.config(state="normal")
+        self._app.status_bar.set_error(f"Ошибка анализа: {error_msg}")
+
+    # ──────────────────────────── Отображение результатов ─────────────────────
+
+    def _display_results(self, result: AnalysisResult) -> None:
+        """Заполнить таблицу результатов.
+
+        Args:
+            result: Результат анализа.
+        """
+        r = result
+        ratios = r.ratios
+        thickness = r.thickness
+
+        self._result_vars["density"].set(f"{r.density_per_cm2:.1f}")
+        self._result_vars["hair_count"].set(str(r.hair_count))
+
+        self._result_vars["terminal"].set(
+            f"{ratios.terminal_count} ({ratios.terminal_pct:.1f}%)",
+        )
+        self._result_vars["vellus"].set(
+            f"{ratios.vellus_count} ({ratios.vellus_pct:.1f}%)",
+        )
+        self._result_vars["intermediate"].set(
+            f"{ratios.intermediate_count} ({ratios.intermediate_pct:.1f}%)",
+        )
+        self._result_vars["tv_ratio"].set(f"{ratios.tv_ratio:.1f}")
+
+        self._result_vars["mean_thickness"].set(f"{thickness.mean:.1f}")
+        self._result_vars["median_thickness"].set(f"{thickness.median:.1f}")
+        self._result_vars["std_thickness"].set(f"{thickness.std:.1f}")
+        self._result_vars["min_thickness"].set(f"{thickness.min:.1f}")
+        self._result_vars["max_thickness"].set(f"{thickness.max:.1f}")
+
+        self._result_vars["fov_area"].set(f"{r.fov_area_mm2:.2f}")
+
+    def _clear_results(self) -> None:
+        """Очистить таблицу результатов."""
+        for var in self._result_vars.values():
+            var.set("--")
+
+    def _on_toggle_view(self) -> None:
+        """Переключение между исходным и аннотированным изображением."""
+        if self._analysis_result is None:
+            return
+
+        if self._showing_annotated:
+            # Показать исходное
+            if self._current_image is not None:
+                self._image_canvas.show_numpy(self._current_image)
+            self._toggle_btn.config(text="Показать разметку")
+            self._showing_annotated = False
+        else:
+            # Показать аннотированное
+            annotated = self._analysis_result.annotated_image
+            if annotated is not None:
+                self._image_canvas.show_numpy(annotated)
+            self._toggle_btn.config(text="Показать оригинал")
+            self._showing_annotated = True
+
+    # ──────────────────────────── Гистограмма ─────────────────────────────────
+
+    def _draw_empty_histogram(self) -> None:
+        """Нарисовать пустую гистограмму (до анализа)."""
+        self._ax.clear()
+        self._ax.set_xlabel("Толщина (мкм)")
+        self._ax.set_ylabel("Количество")
+        self._ax.set_title("Распределение толщины волос")
+        self._ax.text(
+            0.5, 0.5,
+            "Нет данных",
+            transform=self._ax.transAxes,
+            ha="center", va="center",
+            fontsize=12, color="gray",
+        )
+        self._figure.tight_layout(pad=2.0)
+        self._chart_canvas.draw()
+
+    def _draw_histogram(self, result: AnalysisResult) -> None:
+        """Нарисовать гистограмму толщин по результатам анализа.
+
+        Args:
+            result: Результат анализа с измерениями.
+        """
+        self._ax.clear()
+
+        if not result.measurements:
+            self._draw_empty_histogram()
+            return
+
+        thicknesses = [m.thickness_um for m in result.measurements]
+        vellus_threshold = self._app.config.analysis.vellus_threshold_um
+        intermediate_threshold = self._app.config.analysis.intermediate_threshold_um
+
+        # Разделение по типам
+        vellus_t = [t for t in thicknesses if t < vellus_threshold]
+        intermediate_t = [
+            t for t in thicknesses
+            if vellus_threshold <= t < intermediate_threshold
+        ]
+        terminal_t = [t for t in thicknesses if t >= intermediate_threshold]
+
+        # Общие бины
+        max_val = max(thicknesses) if thicknesses else 100
+        bins = list(range(0, int(max_val) + 10, 5))
+
+        # Рисуем гистограммы стопкой
+        if vellus_t:
+            self._ax.hist(
+                vellus_t, bins=bins, color="#FF6B6B",
+                alpha=0.7, label=f"Vellus (<{vellus_threshold:.0f} мкм)",
+            )
+        if intermediate_t:
+            self._ax.hist(
+                intermediate_t, bins=bins, color="#FFD93D",
+                alpha=0.7, label=f"Intermediate ({vellus_threshold:.0f}-{intermediate_threshold:.0f} мкм)",
+            )
+        if terminal_t:
+            self._ax.hist(
+                terminal_t, bins=bins, color="#6BCB77",
+                alpha=0.7, label=f"Terminal (>{intermediate_threshold:.0f} мкм)",
+            )
+
+        # Пороговые линии
+        self._ax.axvline(
+            x=vellus_threshold, color="red", linestyle="--", linewidth=1,
+            label=f"Порог Vellus ({vellus_threshold:.0f} мкм)",
+        )
+        self._ax.axvline(
+            x=intermediate_threshold, color="orange", linestyle="--", linewidth=1,
+            label=f"Порог Terminal ({intermediate_threshold:.0f} мкм)",
+        )
+
+        self._ax.set_xlabel("Толщина (мкм)")
+        self._ax.set_ylabel("Количество")
+        self._ax.set_title("Распределение толщины волос")
+        self._ax.legend(fontsize=7, loc="upper right")
+
+        self._figure.tight_layout(pad=2.0)
+        self._chart_canvas.draw()
+
+    # ──────────────────────────── Экспорт ─────────────────────────────────────
+
+    def _on_export(self) -> None:
+        """Экспорт аннотированного изображения."""
+        if self._analysis_result is None or self._analysis_result.annotated_image is None:
+            self._app.status_bar.set_text("Нет результатов для экспорта")
+            return
+
+        filetypes = [
+            ("PNG", "*.png"),
+            ("JPEG", "*.jpg"),
+        ]
+        path = filedialog.asksaveasfilename(
+            title="Сохранить результат",
+            filetypes=filetypes,
+            defaultextension=".png",
+        )
+        if path:
+            from phototrichogram.utils.image_utils import save_image
+
+            success = save_image(self._analysis_result.annotated_image, path)
+            if success:
+                self._app.status_bar.set_ready(f"Результат сохранён: {path}")
+            else:
+                self._app.status_bar.set_error("Ошибка сохранения")
+
+    def save_result(self) -> None:
+        """Сохранение результата (вызывается из меню Файл > Сохранить)."""
+        self._on_export()

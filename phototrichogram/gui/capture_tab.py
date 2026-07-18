@@ -22,7 +22,7 @@ import tkinter as tk
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -590,6 +590,21 @@ class CaptureTab(ttk.Frame):
         if self._is_previewing:
             self.after(_PREVIEW_INTERVAL_MS, self._update_preview)
 
+    def get_camera_frame(self) -> np.ndarray[Any, Any] | None:
+        """Вернуть свежий кадр с подключённой камеры.
+
+        Публичный метод для других вкладок (например, «Калибровка»): отдаёт
+        копию последнего кадра живого превью — тот же источник, что использует
+        «Снимок» в карточке зоны (``self._current_frame``).
+
+        Returns:
+            Копия последнего кадра (BGR numpy array) или None, если камера
+            не подключена либо кадр ещё не получен.
+        """
+        if self._camera is None or self._current_frame is None:
+            return None
+        return np.copy(self._current_frame)
+
     # ──────────────────────────── Операции с зонами ───────────────────────────
 
     def _on_zone_load(self, zone_code: str) -> None:
@@ -717,6 +732,20 @@ class CaptureTab(ttk.Frame):
         if not zone_images:
             self._app.status_bar.set_text("Нет загруженных снимков для анализа")
             return
+
+        # Предупредить о потере результатов, если пациент не выбран:
+        # без активного пациента анализ не сохранится в историю (см.
+        # _save_results_to_db). Даём пользователю осознанный выбор.
+        if self._app.active_patient is None:
+            proceed = messagebox.askyesno(
+                "Пациент не выбран",
+                "Результаты анализа НЕ будут сохранены в историю.\n\n"
+                "Выберите пациента двойным кликом на вкладке «Пациенты»,\n"
+                "либо продолжите без сохранения.\n\n"
+                "Продолжить без сохранения?",
+            )
+            if not proceed:
+                return
 
         # Блокировка UI
         self._analyze_btn.config(state="disabled")

@@ -6,6 +6,9 @@
   размеры поля зрения, количество делений, доверие (confidence)
 - Фильтрация по ширине полосы (max_stripe_width)
 - Пользовательский диапазон строк (row_range), BGR-вход
+- Порог по умолчанию Otsu (threshold=None) и повёрнутая на 90° шкала
+- Проверка регулярности: отказ на снимке кожи с «волосами», при малом
+  числе делений (< min_divisions) и нерегулярном шаге (CV > max_spacing_cv)
 - CalibrationError: отсутствие делений на снимке
 """
 
@@ -18,6 +21,39 @@ import pytest
 from phototrichogram.core.calibration import CalibrationError, calibrate_from_ruler
 
 from .conftest import make_ruler_image
+
+
+def make_irregular_ruler(
+    width: int = 400,
+    height: int = 100,
+    gaps: tuple[int, ...] = (16, 24),
+    line_width: int = 2,
+    start: int = 10,
+) -> np.ndarray:
+    """Синтетическая шкала с нерегулярным (чередующимся) шагом делений.
+
+    Расстояния между делениями циклически берутся из gaps. По умолчанию
+    16/24 px даёт коэффициент вариации ~0.25 (> порога max_spacing_cv=0.15) —
+    такая шкала должна быть отклонена как нерегулярная.
+
+    Args:
+        width: Ширина изображения.
+        height: Высота изображения.
+        gaps: Цикл расстояний между соседними делениями (px).
+        line_width: Ширина каждого деления (px).
+        start: X первого деления (px).
+
+    Returns:
+        Grayscale изображение (uint8) размером (height, width).
+    """
+    img = np.ones((height, width), dtype=np.uint8) * 255
+    x = start
+    i = 0
+    while x + line_width <= width:
+        img[:, x : x + line_width] = 0
+        x += gaps[i % len(gaps)]
+        i += 1
+    return img
 
 # ---------------------------------------------------------------------------
 # Расчёт масштаба по известному шагу делений
@@ -145,6 +181,120 @@ class TestCalibrateParameters:
 
         with pytest.raises(CalibrationError):
             calibrate_from_ruler(img, division_um=100.0, max_stripe_width=1)
+
+
+# ---------------------------------------------------------------------------
+# Порог бинаризации и ориентация шкалы
+# ---------------------------------------------------------------------------
+
+
+class TestCalibrateOrientation:
+    """Тесты порога Otsu по умолчанию и распознавания ориентации штрихов."""
+
+    def test_default_threshold_uses_otsu(self) -> None:
+        """threshold=None (Otsu по умолчанию) калибрует стандартную шкалу."""
+        img = make_ruler_image(spacing_px=20, line_width=2)
+
+        result = calibrate_from_ruler(img, division_um=100.0, threshold=None)
+
+        assert result.um_per_px == pytest.approx(5.0)
+
+    def test_default_threshold_equals_explicit_call(self) -> None:
+        """Вызов без threshold эквивалентен явному threshold=None (Otsu)."""
+        img = make_ruler_image(spacing_px=25, line_width=2)
+
+        implicit = calibrate_from_ruler(img, division_um=100.0)
+        explicit = calibrate_from_ruler(img, division_um=100.0, threshold=None)
+
+        assert implicit.um_per_px == pytest.approx(explicit.um_per_px)
+
+    def test_rotated_ruler_calibrated_via_columns(self) -> None:
+        """Шкала, повёрнутая на 90° (горизонтальные штрихи), калибруется по столбцам."""
+        vertical = make_ruler_image(spacing_px=20, line_width=2)
+        rotated = np.ascontiguousarray(vertical.T)  # штрихи стали горизонтальными
+
+        result = calibrate_from_ruler(rotated, division_um=100.0)
+
+        assert result.um_per_px == pytest.approx(5.0)
+        assert result.median_distance_px == pytest.approx(20.0)
+
+    def test_rotated_ruler_matches_original_scale(self) -> None:
+        """Поворот на 90° не меняет масштаб (мкм/px) — тот же шаг делений."""
+        vertical = make_ruler_image(spacing_px=25, line_width=2)
+        rotated = np.ascontiguousarray(vertical.T)
+
+        straight = calibrate_from_ruler(vertical, division_um=100.0)
+        turned = calibrate_from_ruler(rotated, division_um=100.0)
+
+        assert straight.um_per_px == pytest.approx(turned.um_per_px)
+
+
+# ---------------------------------------------------------------------------
+# Проверка регулярности шкалы (отказ на мусоре)
+# ---------------------------------------------------------------------------
+
+
+class TestCalibrateRegularity:
+    """Тесты валидации регулярности: отказ вместо мусорного результата."""
+
+    def test_hair_image_rejected(self, sample_image: np.ndarray) -> None:
+        """Снимок кожи с 'волосами' -> отказ: это не калибровочная шкала."""
+        with pytest.raises(CalibrationError, match="шкала"):
+            calibrate_from_ruler(sample_image, division_um=100.0)
+
+    def test_too_few_divisions_rejected(self) -> None:
+        """Регулярная, но короткая шкала (< min_divisions=8) -> отказ."""
+        # width=140, spacing=30 -> деления на x=10,40,70,100,130 = 5 штук
+        img = make_ruler_image(width=140, height=100, spacing_px=30, line_width=2)
+
+        with pytest.raises(CalibrationError, match="не обнаружена"):
+            calibrate_from_ruler(img, division_um=100.0)
+
+    def test_min_divisions_param_allows_short_ruler(self) -> None:
+        """Снижение min_divisions позволяет калибровать короткую шкалу."""
+        img = make_ruler_image(width=140, height=100, spacing_px=30, line_width=2)
+
+        with pytest.raises(CalibrationError):
+            calibrate_from_ruler(img, division_um=100.0)  # min_divisions=8 по умолчанию
+
+        result = calibrate_from_ruler(img, division_um=100.0, min_divisions=4)
+
+        assert result.um_per_px == pytest.approx(100.0 / 30.0, rel=1e-2)
+
+    def test_irregular_spacing_rejected(self) -> None:
+        """Нерегулярный шаг делений (CV ~0.25 > 0.15) -> отказ."""
+        img = make_irregular_ruler(gaps=(16, 24))
+
+        with pytest.raises(CalibrationError, match="разброс расстояний"):
+            calibrate_from_ruler(img, division_um=100.0)
+
+    def test_max_spacing_cv_param_allows_irregular(self) -> None:
+        """Ослабление max_spacing_cv позволяет принять нерегулярную шкалу."""
+        img = make_irregular_ruler(gaps=(16, 24))
+
+        with pytest.raises(CalibrationError):
+            calibrate_from_ruler(img, division_um=100.0)  # max_spacing_cv=0.15
+
+        result = calibrate_from_ruler(img, division_um=100.0, max_spacing_cv=0.5)
+
+        assert result.divisions_detected >= 8
+
+    def test_low_confidence_rejected_by_min_confidence(self) -> None:
+        """Завышенный min_confidence отклоняет даже идеально регулярную шкалу."""
+        img = make_ruler_image(spacing_px=20, line_width=2)
+
+        # Идеальная шкала даёт confidence≈1.0; порог 1.1 недостижим -> отказ.
+        with pytest.raises(CalibrationError, match="надёжност"):
+            calibrate_from_ruler(img, division_um=100.0, min_confidence=1.1)
+
+    def test_regular_ruler_high_confidence_and_divisions(self) -> None:
+        """Регулярная шкала: высокая надёжность и число делений = число штрихов."""
+        img = make_ruler_image(width=400, height=100, spacing_px=20, line_width=2)
+
+        result = calibrate_from_ruler(img, division_um=100.0)
+
+        assert result.confidence >= 0.5
+        assert result.divisions_detected >= 8
 
 
 # ---------------------------------------------------------------------------

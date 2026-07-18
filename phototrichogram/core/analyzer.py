@@ -19,7 +19,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from phototrichogram.core.classification import HairType, classify_all
-from phototrichogram.core.measurement import HairMeasurement, measure_all
+from phototrichogram.core.measurement import (
+    HairMeasurement,
+    measure_all,
+    split_thick_bundles,
+)
 from phototrichogram.core.segmentation import find_hair_contours, segment_hair
 from phototrichogram.core.stats import (
     HairRatios,
@@ -44,6 +48,8 @@ logger = logging.getLogger(__name__)
 _COLOR_TERMINAL = (0, 255, 0)       # Зелёный
 _COLOR_VELLUS = (0, 0, 255)         # Красный
 _COLOR_INTERMEDIATE = (0, 165, 255)  # Оранжевый
+_COLOR_BUNDLE = (255, 0, 255)        # Пурпурный — слипшийся пучок (исключён)
+_COLOR_BUNDLE_RGB = (255, 0, 255)    # Пурпурный (RGB для PIL, совпадает с BGR)
 _COLOR_TEXT = (0, 255, 255)          # Жёлтый (BGR)
 _COLOR_TEXT_RGB = (255, 255, 0)      # Жёлтый (RGB для PIL)
 _CONTOUR_THICKNESS = 2
@@ -199,6 +205,7 @@ def _annotate_image(
     measurements: list[HairMeasurement],
     density: float,
     ratios: HairRatios,
+    bundles: list[HairMeasurement] | None = None,
 ) -> NDArray[np.uint8]:
     """Аннотация снимка -- контуры волос и информационная панель.
 
@@ -206,20 +213,25 @@ def _annotate_image(
     - Зелёный = Terminal (>40 мкм)
     - Оранжевый = Intermediate (30-40 мкм)
     - Красный = Vellus (<30 мкм)
+    - Пурпурный = слипшийся пучок (толще max_hair_thickness_um, исключён
+      из подсчёта — обводится, чтобы оператор видел, что было отброшено)
 
     Текст рендерится через PIL (ImageFont) для поддержки кириллицы.
     cv2.putText не поддерживает Unicode и показывает '??????' для русских букв.
 
     Args:
         image: Исходное BGR изображение.
-        measurements: Измерения с заполненной классификацией.
+        measurements: Измерения реальных волос с заполненной классификацией.
         density: Плотность волос/см2.
         ratios: Соотношения типов.
+        bundles: Отброшенные слипшиеся пучки (толще порога). Обводятся особым
+            цветом и в подсчёт не входят. None или пустой список — пучков нет.
 
     Returns:
         Копия изображения с нанесённой разметкой.
     """
     annotated = image.copy()
+    bundles = bundles or []
 
     # Рисуем контуры каждого волоса (OpenCV — работает без текста)
     for m in measurements:
@@ -236,6 +248,17 @@ def _annotate_image(
             cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1,
         )
 
+    # Слипшиеся пучки — отдельный пурпурный контур с подписью толщины.
+    # В подсчёт не входят, но показываются, чтобы решение было прозрачным.
+    for b in bundles:
+        cv2.drawContours(annotated, [b.contour], -1, _COLOR_BUNDLE, _CONTOUR_THICKNESS)
+        cx, cy = int(b.center[0]), int(b.center[1])
+        label = f"{b.thickness_um:.0f}"
+        cv2.putText(
+            annotated, label, (cx + 5, cy - 5),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4, _COLOR_BUNDLE, 1,
+        )
+
     # Масштаб шрифта относительно размера изображения
     h, w = annotated.shape[:2]
     font_size = max(12, min(h, w) // 40)
@@ -250,6 +273,9 @@ def _annotate_image(
         f"Vellus: {ratios.vellus_count} ({ratios.vellus_pct:.0f}%)",
         f"T/V: {ratios.tv_ratio:.1f}",
     ]
+    # Отдельной строкой — сколько слипшихся пучков исключено из подсчёта
+    if bundles:
+        info_lines.append(f"Пучки искл.: {len(bundles)}")
 
     # Фон для текста
     panel_h = line_height * len(info_lines) + 10
@@ -270,6 +296,9 @@ def _annotate_image(
         ("Intermediate", _COLOR_INTERMEDIATE, (255, 165, 0)),
         ("Vellus", _COLOR_VELLUS, (255, 0, 0)),
     ]
+    # Пучки в легенде — только если они есть на снимке
+    if bundles:
+        legend_items.append(("Пучок (искл.)", _COLOR_BUNDLE, _COLOR_BUNDLE_RGB))
     legend_font = max(10, font_size - 2)
     ly = h - 20
     for label, color_bgr, color_rgb in reversed(legend_items):
@@ -367,7 +396,20 @@ class Analyzer:
         # 3. Измерение
         measurements = measure_all(contours, config)
 
-        # 4. Классификация
+        # 3a. Физический фильтр невозможных толщин — слипшиеся пучки волос.
+        # Один волос не бывает толще config.max_hair_thickness_um; контуры
+        # толще исключаются из счёта, плотности, соотношений и статистики
+        # толщин (иначе завышают все показатели). Пучки сохраняются отдельно
+        # только для аннотации (обводятся особым цветом).
+        measurements, bundles = split_thick_bundles(measurements, config)
+        if bundles:
+            logger.info(
+                "Отброшено %d контуров толще %.0f мкм (слипшиеся пучки)",
+                len(bundles),
+                config.max_hair_thickness_um,
+            )
+
+        # 4. Классификация (только реальные волосы, без пучков)
         classify_all(measurements, config)
 
         # 5. Статистика — площадь FOV по реальным размерам изображения
@@ -380,7 +422,7 @@ class Analyzer:
         # 6. Аннотация (опционально)
         annotated: NDArray[np.uint8] | None = None
         if annotate:
-            annotated = _annotate_image(image, measurements, density, ratios)
+            annotated = _annotate_image(image, measurements, density, ratios, bundles)
 
         result = AnalysisResult(
             measurements=measurements,

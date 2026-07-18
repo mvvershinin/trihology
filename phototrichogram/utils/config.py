@@ -46,6 +46,8 @@ class AnalysisConfig:
         max_circularity: Максимальная циркулярность (>порога = не волос).
         vellus_threshold_um: Порог Vellus в микронах (клинический стандарт 30 мкм).
         intermediate_threshold_um: Порог Intermediate/Terminal в микронах.
+        max_hair_thickness_um: Максимальная физически возможная толщина одного
+            волоса (мкм). Контуры толще — слипшиеся пучки, исключаются из подсчёта.
         threshold_method: Метод бинаризации ('otsu' | 'adaptive').
     """
 
@@ -85,6 +87,12 @@ class AnalysisConfig:
     # Классификация
     vellus_threshold_um: float = 30.0
     intermediate_threshold_um: float = 40.0
+
+    # Физический фильтр невозможных толщин: один волос не бывает толще этого
+    # порога (мкм). Контуры толще — слипшиеся пучки соседних волос, которые
+    # сегментация объединила в один объект. Исключаются из подсчёта, плотности,
+    # соотношений и статистики толщин, иначе завышают все показатели.
+    max_hair_thickness_um: float = 150.0
 
     # Метод порогового разделения
     threshold_method: str = "otsu"
@@ -155,6 +163,8 @@ class AppConfig:
         autosave: Автоматическое сохранение снимков при захвате.
         window_width: Начальная ширина окна.
         window_height: Начальная высота окна.
+        active_patient_id: ID активного пациента для восстановления при
+                           перезапуске. None — пациент не выбран.
     """
 
     language: str = "ru"
@@ -165,6 +175,7 @@ class AppConfig:
     autosave: bool = True
     window_width: int = 1200
     window_height: int = 800
+    active_patient_id: int | None = None
 
 
 @dataclass

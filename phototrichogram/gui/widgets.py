@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 
 from PIL import Image, ImageTk
 
+from phototrichogram.core.stats import TV_RATIO_MAX
+
 if TYPE_CHECKING:
     from typing import Any
 
@@ -539,3 +541,20 @@ class ImageFileDialog:
             return result
 
         return None
+
+
+def format_tv_ratio(tv_ratio: float) -> str:
+    """Текст показа соотношения T/V для интерфейса.
+
+    Когда пушковых волос нет вообще, ядро возвращает условный максимум
+    TV_RATIO_MAX — показывать его числом непонятно, пишем словами.
+
+    Args:
+        tv_ratio: Соотношение Terminal/Vellus из core.stats.
+
+    Returns:
+        Число с одним знаком после запятой либо «нет пушковых».
+    """
+    if tv_ratio >= TV_RATIO_MAX:
+        return "нет пушковых"
+    return f"{tv_ratio:.1f}"

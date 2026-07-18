@@ -139,3 +139,46 @@ def measure_all(
         len(contours),
     )
     return measurements
+
+
+def split_thick_bundles(
+    measurements: list[HairMeasurement], config: AnalysisConfig
+) -> tuple[list[HairMeasurement], list[HairMeasurement]]:
+    """Разделение измерений на реальные волосы и слипшиеся пучки по толщине.
+
+    Физический фильтр невозможных толщин: один волос не может быть толще
+    config.max_hair_thickness_um. Контуры толще — это слипшиеся пучки соседних
+    волос, которые сегментация объединила в один объект (METHODOLOGY.md §9,
+    ограничение 3). Такие пучки завышают счёт, среднюю толщину и плотность,
+    поэтому исключаются из всех дальнейших расчётов.
+
+    Порог берётся из конфига (config.max_hair_thickness_um) — не захардкожен.
+    Чтобы отключить фильтр, достаточно задать большой порог.
+
+    Args:
+        measurements: Список измерений от measure_all().
+        config: Параметры анализа (max_hair_thickness_um — порог в мкм).
+
+    Returns:
+        Кортеж (hairs, bundles):
+        - hairs — измерения с толщиной <= порога (реальные волосы);
+        - bundles — измерения толще порога (слипшиеся пучки, исключаются).
+    """
+    threshold_um = config.max_hair_thickness_um
+    hairs: list[HairMeasurement] = []
+    bundles: list[HairMeasurement] = []
+
+    for m in measurements:
+        if m.thickness_um > threshold_um:
+            bundles.append(m)
+        else:
+            hairs.append(m)
+
+    if bundles:
+        logger.debug(
+            "Разделение по толщине: волос=%d, пучков>%.0f мкм=%d",
+            len(hairs),
+            threshold_um,
+            len(bundles),
+        )
+    return hairs, bundles

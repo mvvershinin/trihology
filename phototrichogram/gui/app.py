@@ -13,7 +13,9 @@ import logging
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 from phototrichogram.data.database import Database
 from phototrichogram.data.models import Patient
@@ -72,6 +74,7 @@ class App(tk.Tk):
         self._create_notebook()
         self._setup_hotkeys()
         self._setup_close_handler()
+        self._restore_active_patient()
 
         logger.info("Главное окно инициализировано")
 
@@ -101,18 +104,54 @@ class App(tk.Tk):
     def active_patient(self, patient: Patient | None) -> None:
         """Установить активного пациента.
 
-        Обновляет статусбар и уведомляет вкладку истории.
+        Обновляет статусбар и запоминает id пациента в конфиге
+        (app.active_patient_id) — для восстановления при следующем запуске.
 
         Args:
             patient: Объект Patient или None для сброса.
         """
         self._active_patient = patient
         if patient is not None:
+            self._config.app.active_patient_id = patient.id
             self._status_bar.set_ready(f"Пациент: {patient.name}")
             logger.info("Активный пациент: id=%d %s", patient.id, patient.name)
         else:
+            self._config.app.active_patient_id = None
             self._status_bar.set_text("Пациент не выбран")
             logger.info("Активный пациент сброшен")
+
+    def _restore_active_patient(self) -> None:
+        """Восстановить активного пациента из конфига при запуске.
+
+        Читает app.active_patient_id и пытается загрузить пациента из БД.
+        Найден → делает активным (обновляет статусбар и вкладки). Удалён
+        (в БД не найден) → сбрасывает поле в конфиге и логирует. Ошибки БД
+        не прерывают запуск приложения.
+        """
+        patient_id = self._config.app.active_patient_id
+        if patient_id is None:
+            return
+
+        try:
+            patient = self._db.get_patient(patient_id)
+        except Exception as e:
+            logger.warning(
+                "Не удалось восстановить активного пациента id=%d: %s",
+                patient_id, e,
+            )
+            return
+
+        if patient is not None:
+            self.active_patient = patient
+            logger.info(
+                "Восстановлен активный пациент из конфига: id=%d", patient_id,
+            )
+        else:
+            self._config.app.active_patient_id = None
+            logger.info(
+                "Сохранённый пациент id=%d не найден (удалён), выбор сброшен",
+                patient_id,
+            )
 
     def run(self) -> None:
         """Запуск главного цикла событий (mainloop)."""
@@ -400,6 +439,13 @@ class App(tk.Tk):
             if capture_tab is not None and hasattr(capture_tab, "release_camera"):
                 capture_tab.release_camera()
 
+            # Сохранение конфигурации (в т.ч. активного пациента) при выходе
+            try:
+                from phototrichogram.utils.config import save_config
+                save_config(self._config)
+            except Exception as e:
+                logger.warning("Ошибка сохранения конфигурации при выходе: %s", e)
+
             # Закрытие базы данных
             try:
                 self._db.close()
@@ -449,6 +495,23 @@ class App(tk.Tk):
         else:
             self._status_bar.set_error("Вкладка результатов недоступна")
             logger.warning("Вкладка результатов не найдена или не поддерживает load_results")
+
+    def get_camera_frame(self) -> np.ndarray[Any, Any] | None:
+        """Вернуть свежий кадр с камеры вкладки «Захват».
+
+        Делегирует получение кадра вкладке захвата. Если вкладка не загрузилась
+        (заглушка) или не поддерживает захват — безопасно возвращает None.
+
+        Returns:
+            Копия последнего кадра камеры (BGR numpy array) или None, если
+            камера не подключена либо вкладка захвата недоступна.
+        """
+        capture_tab = self._tabs.get("capture")
+        getter = getattr(capture_tab, "get_camera_frame", None)
+        if callable(getter):
+            frame: np.ndarray[Any, Any] | None = getter()
+            return frame
+        return None
 
     def _get_current_tab(self) -> ttk.Frame | None:
         """Получить текущую активную вкладку.

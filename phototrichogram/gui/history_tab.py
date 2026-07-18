@@ -26,6 +26,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from phototrichogram.data.models import Measurement
+from phototrichogram.gui.widgets import format_tv_ratio
 
 if TYPE_CHECKING:
     from phototrichogram.gui.app import App
@@ -131,7 +132,7 @@ class HistoryTab(ttk.Frame):
         self._tree.column("zone", width=60, minwidth=40, anchor="center")
         self._tree.column("density", width=90, minwidth=60, anchor="center")
         self._tree.column("vellus_pct", width=80, minwidth=60, anchor="center")
-        self._tree.column("tv_ratio", width=70, minwidth=50, anchor="center")
+        self._tree.column("tv_ratio", width=110, minwidth=90, anchor="center")
         self._tree.column("thickness", width=110, minwidth=80, anchor="center")
 
         tree_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
@@ -267,7 +268,7 @@ class HistoryTab(ttk.Frame):
                 m.zone,
                 f"{m.density_per_cm2:.0f}",
                 f"{m.vellus_pct:.1f}%",
-                f"{m.tv_ratio:.1f}",
+                format_tv_ratio(m.tv_ratio),
                 f"{m.mean_thickness_um:.1f}",
             ))
 

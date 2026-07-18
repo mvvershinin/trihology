@@ -20,6 +20,11 @@ from phototrichogram.core.measurement import HairMeasurement
 
 logger = logging.getLogger(__name__)
 
+# Условный максимум T/V, когда пушковых волос нет вообще (деление на ноль
+# невозможно). Интерфейс в этом случае показывает текст «нет пушковых»
+# (см. gui/widgets.py: format_tv_ratio).
+TV_RATIO_MAX: float = 99.9
+
 
 @dataclass(frozen=True)
 class ThicknessStats:
@@ -162,8 +167,8 @@ def calculate_ratios(measurements: list[HairMeasurement]) -> HairRatios:
     vellus_pct = vellus / total * 100.0
     intermediate_pct = intermediate / total * 100.0
 
-    # T/V соотношение — vellus=0 → бесконечность, ограничиваем 99.9
-    tv_ratio = terminal / vellus if vellus > 0 else 99.9
+    # T/V соотношение — vellus=0 → бесконечность, ограничиваем TV_RATIO_MAX
+    tv_ratio = terminal / vellus if vellus > 0 else TV_RATIO_MAX
 
     return HairRatios(
         terminal_count=terminal,

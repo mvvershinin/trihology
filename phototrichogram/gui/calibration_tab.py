@@ -12,7 +12,9 @@ from __future__ import annotations
 import logging
 import threading
 import tkinter as tk
-from tkinter import ttk
+from datetime import datetime
+from pathlib import Path
+from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -20,6 +22,8 @@ import numpy as np
 from phototrichogram.gui.widgets import ImageCanvas, ImageFileDialog, ToolTip
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from phototrichogram.core.calibration import CalibrationResult
     from phototrichogram.gui.app import App
 
@@ -51,6 +55,7 @@ class CalibrationTab(ttk.Frame):
         self._app = app
         self._ruler_image: np.ndarray[Any, Any] | None = None
         self._calibration_result: CalibrationResult | None = None
+        self._help_window: _CalibrationHelpWindow | None = None
 
         self._create_widgets()
         self._load_current_config()
@@ -85,6 +90,15 @@ class CalibrationTab(ttk.Frame):
         self._load_btn.pack(side="left")
         ToolTip(self._load_btn, "Загрузить фотографию калибровочной шкалы (микрометр)")
 
+        self._camera_btn = ttk.Button(
+            btn_frame, text="Снимок с камеры", command=self._on_capture_from_camera,
+        )
+        self._camera_btn.pack(side="left", padx=(5, 0))
+        ToolTip(
+            self._camera_btn,
+            "Снять калибровочную шкалу с подключённого микроскопа",
+        )
+
         # Канвас
         self._image_canvas = ImageCanvas(left_frame, width=640, height=480)
         self._image_canvas.grid(row=1, column=0, sticky="nsew")
@@ -100,9 +114,27 @@ class CalibrationTab(ttk.Frame):
         right_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 5), pady=5)
         right_frame.grid_columnconfigure(0, weight=1)
 
+        # Заголовок панели с кнопкой справки
+        header_frame = ttk.Frame(right_frame)
+        header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        header_frame.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(
+            header_frame, text="Калибровка микроскопа", style="Header.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+
+        self._help_btn = ttk.Button(
+            header_frame, text="Справка", width=10, command=self._on_show_help,
+        )
+        self._help_btn.grid(row=0, column=1, sticky="e")
+        ToolTip(
+            self._help_btn,
+            "Что такое калибровочное стекло и как калибровать",
+        )
+
         # Параметры автокалибровки
         auto_frame = ttk.LabelFrame(right_frame, text="Автокалибровка", padding=10)
-        auto_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        auto_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         auto_frame.grid_columnconfigure(1, weight=1)
 
         ttk.Label(auto_frame, text="Цена деления (мкм):").grid(
@@ -113,7 +145,13 @@ class CalibrationTab(ttk.Frame):
             auto_frame, textvariable=self._division_um_var, width=10,
         )
         division_entry.grid(row=0, column=1, sticky="e", pady=3)
-        ToolTip(division_entry, "Цена одного деления шкалы в микронах (обычно 100)")
+        ToolTip(
+            division_entry,
+            "Цена одного деления шкалы. Типичные стёкла: 10 мкм "
+            "(0.01 мм/дел — самое распространённое, „1 мм / 100 делений“) "
+            "или 100 мкм (0.1 мм/дел). "
+            "Неверное значение даст ошибку масштаба в 10 раз!",
+        )
 
         ttk.Label(auto_frame, text="Порог бинаризации:").grid(
             row=1, column=0, sticky="w", pady=3,
@@ -137,7 +175,7 @@ class CalibrationTab(ttk.Frame):
 
         # Ручной ввод
         manual_frame = ttk.LabelFrame(right_frame, text="Ручная калибровка", padding=10)
-        manual_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        manual_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         manual_frame.grid_columnconfigure(1, weight=1)
 
         ttk.Label(manual_frame, text="Масштаб (мкм/px):").grid(
@@ -157,7 +195,7 @@ class CalibrationTab(ttk.Frame):
 
         # Результат калибровки
         result_frame = ttk.LabelFrame(right_frame, text="Результат", padding=10)
-        result_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        result_frame.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         result_frame.grid_columnconfigure(1, weight=1)
 
         self._result_vars: dict[str, tk.StringVar] = {}
@@ -185,14 +223,14 @@ class CalibrationTab(ttk.Frame):
             right_frame, text="Сохранить калибровку", command=self._on_save,
             state="disabled",
         )
-        self._save_btn.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        self._save_btn.grid(row=4, column=0, sticky="ew", pady=(0, 10))
         ToolTip(self._save_btn, "Сохранить калибровку в конфигурацию приложения")
 
         # Текущие значения из конфига
         current_frame = ttk.LabelFrame(
             right_frame, text="Текущая конфигурация", padding=10,
         )
-        current_frame.grid(row=4, column=0, sticky="ew")
+        current_frame.grid(row=5, column=0, sticky="ew")
         current_frame.grid_columnconfigure(1, weight=1)
 
         self._current_vars: dict[str, tk.StringVar] = {}
@@ -223,6 +261,26 @@ class CalibrationTab(ttk.Frame):
         self._current_vars["cur_fov_a"].set(f"{analysis.fov_area_mm2:.2f}")
         self._manual_um_px_var.set(analysis.um_per_px)
 
+    # ──────────────────────────── Справка ─────────────────────────────────────
+
+    def _on_show_help(self) -> None:
+        """Открыть окно справки по калибровке.
+
+        Если окно уже открыто — поднимает существующее поверх остальных
+        (и разворачивает, если было свёрнуто) вместо создания второго.
+        """
+        if self._help_window is not None and self._help_window.winfo_exists():
+            self._help_window.deiconify()
+            self._help_window.lift()
+            self._help_window.focus_set()
+            return
+
+        self._help_window = _CalibrationHelpWindow(self, on_close=self._on_help_closed)
+
+    def _on_help_closed(self) -> None:
+        """Сбросить ссылку на окно справки после его закрытия."""
+        self._help_window = None
+
     # ──────────────────────────── Загрузка изображения ────────────────────────
 
     def _on_load_ruler(self) -> None:
@@ -236,12 +294,71 @@ class CalibrationTab(ttk.Frame):
 
         image = load_image(path)
         if image is not None:
-            self._ruler_image = image
-            self._image_canvas.show_numpy(image)
-            self._auto_btn.config(state="normal")
+            self._set_ruler_image(image)
             self._app.status_bar.set_ready(f"Шкала загружена: {path.name}")
         else:
             self._app.status_bar.set_error(f"Не удалось загрузить: {path}")
+
+    def _set_ruler_image(self, image: np.ndarray[Any, Any]) -> None:
+        """Показать снимок шкалы и подготовить UI к автокалибровке.
+
+        Общий путь для загрузки из файла и захвата с камеры: сохраняет кадр
+        в ``self._ruler_image``, выводит его на канвас и активирует кнопку
+        автокалибровки.
+
+        Args:
+            image: BGR numpy array снимка калибровочной шкалы.
+        """
+        self._ruler_image = image
+        self._image_canvas.show_numpy(image)
+        self._auto_btn.config(state="normal")
+
+    def _on_capture_from_camera(self) -> None:
+        """Снять калибровочную шкалу с подключённого микроскопа.
+
+        Берёт свежий кадр камеры со вкладки «Захват» через App.get_camera_frame().
+        Если камера не подключена — показывает предупреждение. Иначе кладёт кадр
+        тем же путём, что и загрузка из файла, и при включённом autosave
+        сохраняет его в директорию изображений.
+        """
+        frame = self._app.get_camera_frame()
+        if frame is None:
+            messagebox.showwarning(
+                "Камера не подключена",
+                "Камера не подключена.\n\n"
+                "Подключите микроскоп на вкладке «Захват», "
+                "затем вернитесь сюда.",
+            )
+            return
+
+        self._set_ruler_image(frame)
+        self._app.status_bar.set_ready("Снимок шкалы получен с камеры")
+        logger.info("Снимок калибровочной шкалы получен с камеры")
+
+        if self._app.config.app.autosave:
+            self._autosave_ruler(frame)
+
+    def _autosave_ruler(self, frame: np.ndarray[Any, Any]) -> None:
+        """Сохранить снимок шкалы в директорию изображений.
+
+        Вызывается при включённом autosave. Ошибки сохранения логируются и
+        не прерывают основной сценарий калибровки.
+
+        Args:
+            frame: BGR numpy array снимка калибровочной шкалы.
+        """
+        try:
+            images_dir = Path(self._app.config.app.images_dir)
+            images_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = images_dir / f"calibration_{timestamp}.png"
+
+            from phototrichogram.utils.image_utils import save_image
+            save_image(frame, path)
+            logger.debug("Автосохранение снимка шкалы: %s", path)
+        except Exception as e:
+            logger.error("Ошибка автосохранения снимка шкалы: %s", e)
 
     # ──────────────────────────── Автокалибровка ──────────────────────────────
 
@@ -331,6 +448,7 @@ class CalibrationTab(ttk.Frame):
         self._progress.grid_remove()
         self._auto_btn.config(state="normal")
         self._app.status_bar.set_error(f"Ошибка калибровки: {error_msg}")
+        messagebox.showwarning("Калибровка не удалась", error_msg)
 
     # ──────────────────────────── Ручная калибровка ───────────────────────────
 
@@ -392,3 +510,185 @@ class CalibrationTab(ttk.Frame):
         except (tk.TclError, ValueError, OSError) as e:
             logger.error("Ошибка сохранения калибровки: %s", e)
             self._app.status_bar.set_error(f"Ошибка: {e}")
+
+
+class _CalibrationHelpWindow(tk.Toplevel):
+    """Окно справки по калибровке микроскопа.
+
+    Показывает read-only текст с прокруткой: зачем нужна калибровка, какое
+    калибровочное стекло купить, как откалибровать по шагам и что делать,
+    если стекла нет. Закрывается кнопкой «Закрыть», клавишей Escape или
+    системным крестиком — любой путь вызывает колбэк ``on_close`` (сброс
+    ссылки во вкладке) и уничтожает окно.
+    """
+
+    _WIDTH = 560
+    _HEIGHT = 520
+
+    # Разделы справки: (стиль, текст). Стиль совпадает с именем тега tk.Text.
+    _SECTIONS: tuple[tuple[str, str], ...] = (
+        ("header", "Зачем нужна калибровка"),
+        (
+            "body",
+            "Калибровка говорит программе, сколько микрон в одном пикселе "
+            "снимка. Без неё толщина волос и плотность считаются по значению "
+            "по умолчанию (5.9 мкм/px) — примерно, но не точно для вашего "
+            "микроскопа.",
+        ),
+        ("header", "Что нужно для калибровки"),
+        (
+            "body",
+            "Калибровочное стекло (stage micrometer) — стеклянная пластинка с "
+            "точной шкалой. Продаётся в магазинах микроскопии и на АлиЭкспресс "
+            "(примерно 300–1000 ₽).",
+        ),
+        ("body", "Самые распространённые стёкла:"),
+        (
+            "bullet",
+            "«1 мм / 100 делений» — цена деления 0.01 мм = 10 мкм → в поле "
+            "«Цена деления» впишите 10",
+        ),
+        (
+            "bullet",
+            "«10 мм / 100 делений» — цена деления 0.1 мм = 100 мкм → впишите 100",
+        ),
+        ("bullet", "двойные — обе шкалы на одном стекле, используйте любую"),
+        (
+            "warn",
+            "ВАЖНО: неправильная цена деления даст ошибку масштаба в 10 раз. "
+            "Проверьте маркировку на самом стекле или в его описании.",
+        ),
+        ("header", "Как откалибровать"),
+        ("step", "1. Положите стекло под микроскоп, наведите резкость на штрихи"),
+        ("step", "2. Подключите камеру на вкладке «Захват» и вернитесь сюда"),
+        (
+            "step",
+            "3. Нажмите «Снимок с камеры» (или загрузите готовый файл со шкалой)",
+        ),
+        ("step", "4. Укажите цену деления вашего стекла в микронах"),
+        (
+            "step",
+            "5. Нажмите «Автокалибровка» — программа найдёт штрихи и посчитает "
+            "масштаб",
+        ),
+        (
+            "step",
+            "6. Проверьте результат (число делений, надёжность) и нажмите "
+            "«Сохранить калибровку»",
+        ),
+        ("header", "Если стекла нет"),
+        (
+            "body",
+            "Калибровать не на чем — используйте «Ручную калибровку»: введите "
+            "5.9 мкм/px (типичное значение для USB-микроскопов 640×480 при "
+            "увеличении 200×) и нажмите «Применить». Точность будет "
+            "приблизительной.",
+        ),
+    )
+
+    def __init__(
+        self, parent: CalibrationTab, on_close: Callable[[], None],
+    ) -> None:
+        """Инициализация окна справки.
+
+        Args:
+            parent: Вкладка калибровки — мастер окна.
+            on_close: Колбэк, вызываемый при закрытии (сброс ссылки во вкладке).
+        """
+        super().__init__(parent)
+        self._on_close = on_close
+
+        self.title("Справка — калибровка микроскопа")
+        self.minsize(440, 380)
+        self.transient(parent.winfo_toplevel())
+
+        self._create_widgets()
+
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Escape>", lambda _event: self._close())
+
+        self._center_on_parent(parent)
+        self.focus_set()
+
+    def _create_widgets(self) -> None:
+        """Создать виджеты: текст справки с прокруткой и кнопку «Закрыть»."""
+        container = ttk.Frame(self, padding=(10, 10, 10, 0))
+        container.pack(fill="both", expand=True)
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        text = tk.Text(
+            container,
+            wrap="word",
+            relief="flat",
+            padx=10,
+            pady=8,
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground="#c0c0c0",
+            background="#fbfbfb",
+            cursor="arrow",
+        )
+        scrollbar = ttk.Scrollbar(
+            container, orient="vertical", command=text.yview,
+        )
+        text.configure(yscrollcommand=scrollbar.set)
+        text.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self._fill_text(text)
+        text.configure(state="disabled")
+
+        btn_frame = ttk.Frame(self, padding=10)
+        btn_frame.pack(fill="x")
+        close_btn = ttk.Button(btn_frame, text="Закрыть", command=self._close)
+        close_btn.pack(side="right")
+
+    def _fill_text(self, text: tk.Text) -> None:
+        """Заполнить текстовый виджет разделами справки с форматированием.
+
+        Args:
+            text: Виджет tk.Text в состоянии ``normal``.
+        """
+        text.tag_configure(
+            "header", font=("", 11, "bold"), spacing1=12, spacing3=4,
+        )
+        text.tag_configure("body", font=("", 10), spacing3=6)
+        text.tag_configure(
+            "bullet", font=("", 10), spacing3=3, lmargin1=16, lmargin2=28,
+        )
+        text.tag_configure(
+            "step", font=("", 10), spacing3=3, lmargin1=16, lmargin2=32,
+        )
+        text.tag_configure(
+            "warn",
+            font=("", 10, "bold"),
+            foreground="#b00020",
+            spacing1=4,
+            spacing3=6,
+        )
+
+        for style, content in self._SECTIONS:
+            line = f"•  {content}\n" if style == "bullet" else f"{content}\n"
+            text.insert("end", line, style)
+
+    def _center_on_parent(self, parent: tk.Widget) -> None:
+        """Разместить окно по центру относительно главного окна.
+
+        Args:
+            parent: Виджет-мастер, по чьему toplevel считается центр.
+        """
+        root = parent.winfo_toplevel()
+        root.update_idletasks()
+        px = root.winfo_rootx()
+        py = root.winfo_rooty()
+        pw = root.winfo_width()
+        ph = root.winfo_height()
+        x = px + max(0, (pw - self._WIDTH) // 2)
+        y = py + max(0, (ph - self._HEIGHT) // 2)
+        self.geometry(f"{self._WIDTH}x{self._HEIGHT}+{x}+{y}")
+
+    def _close(self) -> None:
+        """Закрыть окно справки и уведомить вкладку о закрытии."""
+        self._on_close()
+        self.destroy()

@@ -25,7 +25,7 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from phototrichogram.gui.widgets import ToolTip
+from phototrichogram.gui.widgets import ToolTip, format_tv_ratio
 
 if TYPE_CHECKING:
     from phototrichogram.core.analyzer import AnalysisResult
@@ -69,6 +69,16 @@ _TV_RATIO_NORM_MIN = 4.0
 _TV_RATIO_BORDERLINE_MIN = 2.0
 _DENSITY_DIFF_BORDERLINE = -15.0  # %
 _DENSITY_DIFF_BAD = -30.0
+
+# Справочный диапазон средней толщины волоса, мкм (METHODOLOGY.md §2.2).
+# Нижняя граница 40 = порог нормы Terminal (§2.2: «Толщина Terminal > 40 мкм»).
+# Верхняя граница 80 мкм — клинический ориентир средней толщины
+# терминального волоса (в таблице §2.2 явно не задана). Значение используется
+# ТОЛЬКО в справочном блоке; в раскраске индикаторов (_assess_status)
+# не участвует, поэтому вынесено отдельными константами и не дублирует
+# пороги раскраски выше.
+_THICKNESS_MEAN_NORM_MIN_UM = 40.0
+_THICKNESS_MEAN_NORM_MAX_UM = 80.0
 
 
 def _assess_status(
@@ -218,7 +228,7 @@ class _ZoneResultCard(ttk.Frame):
         """
         self._vars["density"].set(f"{density:.0f}/см\u00B2")
         self._vars["vellus"].set(f"{vellus_pct:.0f}%")
-        self._vars["tv_ratio"].set(f"{tv_ratio:.1f}")
+        self._vars["tv_ratio"].set(format_tv_ratio(tv_ratio))
 
         if density_diff_pct is not None:
             sign = "+" if density_diff_pct >= 0 else ""
@@ -269,9 +279,13 @@ class MultizoneTab(ttk.Frame):
     def _create_widgets(self) -> None:
         """Создание всех виджетов вкладки."""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        # Растягивается только нижняя панель (графики + детали). Карточки зон
+        # (row 0) и справочный блок норм (row 1) — фиксированной высоты,
+        # всегда видимы.
+        self.grid_rowconfigure(2, weight=1)
 
         self._create_zones_panel()
+        self._create_norms_panel()
         self._create_bottom_panel()
 
     def _create_zones_panel(self) -> None:
@@ -295,10 +309,109 @@ class MultizoneTab(ttk.Frame):
             card.bind("<Button-1>", _on_card_click)
             self._zone_cards[zone_code] = card
 
+    def _create_norms_panel(self) -> None:
+        """Создание справочного блока норм (компактный, всегда видим).
+
+        Блок располагается между карточками зон и графиками. Показывает
+        референсные диапазоны (форматируются из тех же констант, что и
+        раскраска индикаторов) и расшифровку цветов. Только числа и цвета —
+        без диагнозов, названий болезней и рекомендаций.
+        """
+        norms_frame = ttk.LabelFrame(self, text="Нормы (справочно)", padding=6)
+        norms_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 2))
+        norms_frame.grid_columnconfigure(0, weight=1)
+
+        # Строка норм формируется из констант раскраски (_assess_status),
+        # чтобы отображаемые значения всегда совпадали с логикой индикаторов.
+        # Средняя толщина — единственное значение из METHODOLOGY §2.2.
+        norms_text = (
+            f"Плотность: ≥{_DENSITY_NORM_MIN:.0f}/см² норма, "
+            f"{_DENSITY_BORDERLINE_MIN:.0f}–{_DENSITY_NORM_MIN:.0f} погранично"
+            f"     ·     "
+            f"Vellus: ≤{_VELLUS_PCT_NORM_MAX:.0f}% норма, "
+            f"{_VELLUS_PCT_NORM_MAX:.0f}–{_VELLUS_PCT_BORDERLINE_MAX:.0f}% погранично"
+            f"     ·     "
+            f"T/V: ≥{_TV_RATIO_NORM_MIN:.0f} норма, "
+            f"{_TV_RATIO_BORDERLINE_MIN:.0f}–{_TV_RATIO_NORM_MIN:.0f} погранично"
+            f"     ·     "
+            f"Средняя толщина: "
+            f"{_THICKNESS_MEAN_NORM_MIN_UM:.0f}–{_THICKNESS_MEAN_NORM_MAX_UM:.0f} мкм"
+        )
+        self._norms_label = ttk.Label(
+            norms_frame, text=norms_text, font=("", 9), justify="left",
+        )
+        self._norms_label.grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+        # Легенда цветовых индикаторов с реальными маркерами _STATUS_COLORS.
+        legend = self._create_color_legend(norms_frame)
+        legend.grid(row=1, column=0, sticky="w", pady=(0, 4))
+
+        # Обязательная приписка мелким шрифтом.
+        ttk.Label(
+            norms_frame,
+            text="Значения справочные (METHODOLOGY §2.2), "
+            "не являются диагнозом",
+            font=("", 7),
+            foreground="#757575",
+        ).grid(row=2, column=0, sticky="w")
+
+        # Адаптивный перенос длинной строки норм по ширине блока — чтобы
+        # справочный блок не растягивал вкладку по горизонтали.
+        norms_frame.bind("<Configure>", self._on_norms_configure)
+
+    def _create_color_legend(self, parent: tk.Widget) -> ttk.Frame:
+        """Собрать легенду цветовых индикаторов с реальными маркерами.
+
+        Каждый пункт — цветной квадрат (tk.Canvas в цвете из _STATUS_COLORS)
+        и подпись. Цвета берутся из _STATUS_COLORS, поэтому совпадают
+        с индикаторами карточек зон.
+
+        Args:
+            parent: Родительский виджет.
+
+        Returns:
+            Frame с пунктами легенды, расположенными в ряд.
+        """
+        legend = ttk.Frame(parent)
+
+        legend_items: list[tuple[str, str]] = [
+            ("good", "в пределах норм"),
+            ("warning", "погранично"),
+            ("bad", "за пределами норм"),
+            ("neutral", "контроль / нет данных"),
+        ]
+
+        for status_key, caption in legend_items:
+            item = ttk.Frame(legend)
+            item.pack(side="left", padx=(0, 14))
+
+            swatch = tk.Canvas(item, width=13, height=13, highlightthickness=0)
+            swatch.create_rectangle(
+                1, 1, 12, 12,
+                fill=_STATUS_COLORS[status_key],
+                outline="#616161",
+            )
+            swatch.pack(side="left", padx=(0, 4))
+
+            ttk.Label(item, text=caption, font=("", 8)).pack(side="left")
+
+        return legend
+
+    def _on_norms_configure(self, event: tk.Event[Any]) -> None:
+        """Обновить перенос строки норм при изменении ширины блока.
+
+        Держит справочный блок компактным и не даёт длинной строке
+        растягивать вкладку по горизонтали.
+
+        Args:
+            event: Событие изменения размера LabelFrame норм.
+        """
+        self._norms_label.configure(wraplength=max(event.width - 24, 120))
+
     def _create_bottom_panel(self) -> None:
         """Создание нижней панели (графики + детали зоны)."""
         bottom_frame = ttk.Frame(self)
-        bottom_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=(2, 5))
+        bottom_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=(2, 5))
         bottom_frame.grid_columnconfigure(0, weight=3)
         bottom_frame.grid_columnconfigure(1, weight=2)
         bottom_frame.grid_rowconfigure(0, weight=1)
@@ -484,7 +597,7 @@ class MultizoneTab(ttk.Frame):
             f"Terminal: {ratios.terminal_count} ({ratios.terminal_pct:.0f}%)",
             f"Vellus: {ratios.vellus_count} ({ratios.vellus_pct:.0f}%)",
             f"Intermediate: {ratios.intermediate_count} ({ratios.intermediate_pct:.0f}%)",
-            f"T/V: {ratios.tv_ratio:.1f}",
+            f"T/V: {format_tv_ratio(ratios.tv_ratio)}",
             "",
             f"Толщина: {t.mean:.1f} \u00b1 {t.std:.1f} мкм",
             f"Медиана: {t.median:.1f} мкм",

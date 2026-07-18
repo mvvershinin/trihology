@@ -17,19 +17,32 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
+from tkinter import font as tkfont
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from phototrichogram.gui.widgets import ImageCanvas, ImageFileDialog, ToolTip
+from phototrichogram.gui.widgets import ImageCanvas, ImageFileDialog, ToolTip, format_tv_ratio
 
 if TYPE_CHECKING:
     from phototrichogram.core.analyzer import AnalysisResult
     from phototrichogram.gui.app import App
 
 logger = logging.getLogger(__name__)
+
+# ── Референсные нормы (справочно) ─ источник: docs/METHODOLOGY.md §2.2 ──────
+# METHODOLOGY §2.2: плотность 150–300 волос/см²; Vellus < 20 %; T/V > 4:1;
+# толщина Terminal > 40 мкм. Верхняя граница средней толщины (80 мкм) в §2.2
+# явно не задана — это ориентировочный верх нормы диаметра стержня.
+# Значения справочные, диагностическими порогами НЕ являются.
+_NORM_DENSITY_MIN = 150    # волос/см², нижняя граница нормы плотности
+_NORM_DENSITY_MAX = 300    # волос/см², верхняя граница нормы плотности
+_NORM_VELLUS_MAX_PCT = 20  # %, верхняя граница нормы доли Vellus
+_NORM_TV_RATIO_MIN = 4     # T/V, нижняя граница нормы соотношения
+_NORM_THICKNESS_MIN = 40   # мкм, нижняя граница нормы средней толщины
+_NORM_THICKNESS_MAX = 80   # мкм, ориентировочный верх нормы средней толщины
 
 
 class AnalysisTab(ttk.Frame):
@@ -68,12 +81,31 @@ class AnalysisTab(ttk.Frame):
 
     def _create_widgets(self) -> None:
         """Создание всех виджетов вкладки."""
+        self._small_font = self._make_small_font()
+
         self.grid_columnconfigure(0, weight=3)
         self.grid_columnconfigure(1, weight=2)
         self.grid_rowconfigure(0, weight=1)
 
         self._create_image_panel()
         self._create_results_panel()
+
+    def _make_small_font(self) -> tkfont.Font:
+        """Создать уменьшенную копию системного шрифта для дисклеймера.
+
+        Размер — на 2 единицы меньше TkDefaultFont (по модулю, минимум 8),
+        что корректно и для положительного (пункты), и для отрицательного
+        (пиксели) размера Tk. Ссылку на шрифт держим в ``self._small_font``,
+        иначе Tk удалит именованный шрифт при сборке мусора Python-объекта.
+
+        Returns:
+            Именованный шрифт уменьшенного размера.
+        """
+        small_font = tkfont.nametofont("TkDefaultFont", root=self).copy()
+        base_size = int(small_font.cget("size"))
+        sign = -1 if base_size < 0 else 1
+        small_font.configure(size=sign * max(abs(base_size) - 2, 8))
+        return small_font
 
     def _create_image_panel(self) -> None:
         """Создание панели изображения (слева)."""
@@ -126,7 +158,8 @@ class AnalysisTab(ttk.Frame):
         """Создание панели результатов (справа)."""
         right_frame = ttk.Frame(self)
         right_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 5), pady=5)
-        right_frame.grid_rowconfigure(1, weight=1)
+        # Растягивается только гистограмма (row 2); таблица и нормы — по контенту
+        right_frame.grid_rowconfigure(2, weight=1)
         right_frame.grid_columnconfigure(0, weight=1)
 
         # Таблица результатов
@@ -134,6 +167,7 @@ class AnalysisTab(ttk.Frame):
         results_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
         results_frame.grid_columnconfigure(1, weight=1)
 
+        tooltips = self._build_result_tooltips()
         self._result_vars: dict[str, tk.StringVar] = {}
         fields = [
             ("density", "Плотность (волос/см^2):"),
@@ -160,18 +194,28 @@ class AnalysisTab(ttk.Frame):
                 )
                 continue
 
-            ttk.Label(results_frame, text=label).grid(
-                row=row, column=0, sticky="w", pady=1,
-            )
+            name_label = ttk.Label(results_frame, text=label)
+            name_label.grid(row=row, column=0, sticky="w", pady=1)
+
             var = tk.StringVar(value="--")
             self._result_vars[key] = var
-            ttk.Label(
+            value_label = ttk.Label(
                 results_frame, textvariable=var, style="Value.TLabel",
-            ).grid(row=row, column=1, sticky="e", pady=1)
+            )
+            value_label.grid(row=row, column=1, sticky="e", pady=1)
+
+            # Подсказка с расшифровкой термина — на метку и на значение строки
+            hint = tooltips.get(key)
+            if hint is not None:
+                ToolTip(name_label, hint)
+                ToolTip(value_label, hint)
+
+        # Блок справочных норм (между таблицей и гистограммой)
+        self._create_norms_panel(right_frame, row=1)
 
         # Гистограмма толщин (matplotlib)
         chart_frame = ttk.LabelFrame(right_frame, text="Гистограмма толщин", padding=5)
-        chart_frame.grid(row=1, column=0, sticky="nsew")
+        chart_frame.grid(row=2, column=0, sticky="nsew")
         chart_frame.grid_rowconfigure(0, weight=1)
         chart_frame.grid_columnconfigure(0, weight=1)
 
@@ -187,6 +231,99 @@ class AnalysisTab(ttk.Frame):
         self._chart_widget.grid(row=0, column=0, sticky="nsew")
 
         self._draw_empty_histogram()
+
+    def _build_result_tooltips(self) -> dict[str, str]:
+        """Собрать тексты подсказок для строк таблицы результатов.
+
+        Пороги классификации берутся из конфига (``vellus_threshold_um`` и
+        ``intermediate_threshold_um``), референсные нормы — из локальных
+        констант (METHODOLOGY §2.2). Тексты — простым языком, без диагнозов.
+
+        Returns:
+            Отображение «ключ строки таблицы → текст подсказки».
+        """
+        vellus_um = self._app.config.analysis.vellus_threshold_um
+        intermediate_um = self._app.config.analysis.intermediate_threshold_um
+
+        return {
+            "density": (
+                "Число волос на квадратный сантиметр. "
+                f"Норма: {_NORM_DENSITY_MIN}–{_NORM_DENSITY_MAX}/см²"
+            ),
+            "hair_count": "Обнаружено волос в поле зрения снимка",
+            "terminal": (
+                f"Зрелые толстые волосы (толще {intermediate_um:.0f} мкм). "
+                "Основа здорового покрова"
+            ),
+            "vellus": (
+                f"Пушковые — тонкие бледные волоски (тоньше {vellus_um:.0f} мкм). "
+                f"Их рост — признак истончения. Норма: до {_NORM_VELLUS_MAX_PCT}%"
+            ),
+            "intermediate": (
+                f"Промежуточные ({vellus_um:.0f}–{intermediate_um:.0f} мкм) — "
+                "между пушковым и зрелым"
+            ),
+            "tv_ratio": (
+                f"Отношение зрелых к пушковым. Норма: ≥{_NORM_TV_RATIO_MIN}. "
+                "Если пушковых не найдено вообще — вместо числа пишется «нет пушковых»"
+            ),
+            "mean_thickness": (
+                "Средний диаметр стержня по всем волосам. "
+                f"Норма: {_NORM_THICKNESS_MIN}–{_NORM_THICKNESS_MAX} мкм"
+            ),
+            "median_thickness": "Медианный диаметр стержня, устойчив к выбросам",
+            "std_thickness": "Разброс толщины волос — стандартное отклонение",
+            "min_thickness": "Толщина самого тонкого обнаруженного волоса",
+            "max_thickness": "Толщина самого толстого обнаруженного волоса",
+            "fov_area": "Площадь снимка в мм² по текущей калибровке",
+        }
+
+    def _create_norms_panel(self, parent: ttk.Frame, row: int) -> None:
+        """Создать компактный блок справочных норм.
+
+        Показывает референсные значения (METHODOLOGY §2.2) без диагностики
+        и рекомендаций. Размещается между таблицей результатов и гистограммой;
+        по высоте не растягивается — grid-вес остаётся у гистограммы.
+
+        Args:
+            parent: Родительский фрейм (правая панель).
+            row: Номер строки в сетке ``parent``.
+        """
+        norms_frame = ttk.LabelFrame(parent, text="Нормы (справочно)", padding=(10, 5))
+        norms_frame.grid(row=row, column=0, sticky="ew", pady=(0, 5))
+        norms_frame.grid_columnconfigure(0, weight=1)
+
+        summary = (
+            f"Плотность {_NORM_DENSITY_MIN}–{_NORM_DENSITY_MAX}/см² · "
+            f"Vellus ≤{_NORM_VELLUS_MAX_PCT}% · "
+            f"T/V ≥{_NORM_TV_RATIO_MIN} · "
+            f"Толщина {_NORM_THICKNESS_MIN}–{_NORM_THICKNESS_MAX} мкм"
+        )
+        summary_label = ttk.Label(norms_frame, text=summary, justify="left", wraplength=250)
+        summary_label.grid(row=0, column=0, sticky="w")
+
+        disclaimer_label = ttk.Label(
+            norms_frame,
+            text="Значения справочные (METHODOLOGY §2.2), не являются диагнозом",
+            foreground="gray",
+            font=self._small_font,
+            justify="left",
+            wraplength=250,
+        )
+        disclaimer_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
+
+        # Адаптивный перенос строк под фактическую ширину панели
+        last_width = {"value": 0}
+
+        def _update_wraplength(event: tk.Event) -> None:
+            width = max(event.width - 24, 120)
+            if width == last_width["value"]:
+                return
+            last_width["value"] = width
+            summary_label.configure(wraplength=width)
+            disclaimer_label.configure(wraplength=width)
+
+        norms_frame.bind("<Configure>", _update_wraplength)
 
     # ──────────────────────────── Загрузка изображений ────────────────────────
 
@@ -334,7 +471,7 @@ class AnalysisTab(ttk.Frame):
         self._result_vars["intermediate"].set(
             f"{ratios.intermediate_count} ({ratios.intermediate_pct:.1f}%)",
         )
-        self._result_vars["tv_ratio"].set(f"{ratios.tv_ratio:.1f}")
+        self._result_vars["tv_ratio"].set(format_tv_ratio(ratios.tv_ratio))
 
         self._result_vars["mean_thickness"].set(f"{thickness.mean:.1f}")
         self._result_vars["median_thickness"].set(f"{thickness.median:.1f}")

@@ -24,25 +24,26 @@ import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from phototrichogram.gui.widgets import ImageCanvas, ImageFileDialog, ToolTip, format_tv_ratio
+from phototrichogram.gui.widgets import (
+    ImageCanvas,
+    ImageFileDialog,
+    ToolTip,
+    format_tv_ratio,
+    patient_norms,
+)
 
 if TYPE_CHECKING:
     from phototrichogram.core.analyzer import AnalysisResult
+    from phototrichogram.core.norms import PatientNorms
     from phototrichogram.gui.app import App
 
 logger = logging.getLogger(__name__)
 
-# ── Референсные нормы (справочно) ─ источник: docs/METHODOLOGY.md §2.2 ──────
-# METHODOLOGY §2.2: плотность 150–300 волос/см²; Vellus < 20 %; T/V > 4:1;
-# толщина Terminal > 40 мкм. Верхняя граница средней толщины (80 мкм) в §2.2
-# явно не задана — это ориентировочный верх нормы диаметра стержня.
-# Значения справочные, диагностическими порогами НЕ являются.
-_NORM_DENSITY_MIN = 150    # волос/см², нижняя граница нормы плотности
-_NORM_DENSITY_MAX = 300    # волос/см², верхняя граница нормы плотности
-_NORM_VELLUS_MAX_PCT = 20  # %, верхняя граница нормы доли Vellus
-_NORM_TV_RATIO_MIN = 4     # T/V, нижняя граница нормы соотношения
-_NORM_THICKNESS_MIN = 40   # мкм, нижняя граница нормы средней толщины
-_NORM_THICKNESS_MAX = 80   # мкм, ориентировочный верх нормы средней толщины
+# Референсные нормы (плотность, vellus %, T/V, толщина) больше НЕ хранятся
+# здесь: единый источник — core.norms через мостик widgets.patient_norms,
+# подбирающий значения под пол/возраст/этнос активного пациента. Пороги
+# классификации Vellus/Intermediate (в мкм) — это не нормы, они берутся из
+# config.analysis и остаются независимыми.
 
 
 class AnalysisTab(ttk.Frame):
@@ -167,8 +168,11 @@ class AnalysisTab(ttk.Frame):
         results_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
         results_frame.grid_columnconfigure(1, weight=1)
 
-        tooltips = self._build_result_tooltips()
+        tooltips = self._build_result_tooltips(patient_norms(self._app.active_patient))
         self._result_vars: dict[str, tk.StringVar] = {}
+        # Подсказки строк, зависящие от норм, — храним для обновления при смене
+        # пациента / показе результата (по две на строку: метка и значение).
+        self._row_tooltips: dict[str, list[ToolTip]] = {}
         fields = [
             ("density", "Плотность (волос/см^2):"),
             ("hair_count", "Всего волос:"),
@@ -207,8 +211,10 @@ class AnalysisTab(ttk.Frame):
             # Подсказка с расшифровкой термина — на метку и на значение строки
             hint = tooltips.get(key)
             if hint is not None:
-                ToolTip(name_label, hint)
-                ToolTip(value_label, hint)
+                self._row_tooltips[key] = [
+                    ToolTip(name_label, hint),
+                    ToolTip(value_label, hint),
+                ]
 
         # Блок справочных норм (между таблицей и гистограммой)
         self._create_norms_panel(right_frame, row=1)
@@ -232,12 +238,22 @@ class AnalysisTab(ttk.Frame):
 
         self._draw_empty_histogram()
 
-    def _build_result_tooltips(self) -> dict[str, str]:
+        # Первичное заполнение блока норм и подсказок (общая норма либо
+        # восстановленный активный пациент). Единый путь — _refresh_norms.
+        self._refresh_norms()
+
+    def _build_result_tooltips(self, norms: PatientNorms) -> dict[str, str]:
         """Собрать тексты подсказок для строк таблицы результатов.
 
         Пороги классификации берутся из конфига (``vellus_threshold_um`` и
-        ``intermediate_threshold_um``), референсные нормы — из локальных
-        констант (METHODOLOGY §2.2). Тексты — простым языком, без диагнозов.
+        ``intermediate_threshold_um``) — это не нормы. Референсные нормы
+        (плотность, доля vellus, T/V, толщина) берутся из переданного
+        ``PatientNorms`` — персональных норм активного пациента (или общей
+        нормы). Тексты — простым языком, без диагнозов.
+
+        Args:
+            norms: Персональные нормы пациента (или общая норма) — источник
+                числовых границ для строк плотности, vellus, T/V и толщины.
 
         Returns:
             Отображение «ключ строки таблицы → текст подсказки».
@@ -248,7 +264,7 @@ class AnalysisTab(ttk.Frame):
         return {
             "density": (
                 "Число волос на квадратный сантиметр. "
-                f"Норма: {_NORM_DENSITY_MIN}–{_NORM_DENSITY_MAX}/см²"
+                f"Норма: {norms.density.low:.0f}–{norms.density.high:.0f}/см²"
             ),
             "hair_count": "Обнаружено волос в поле зрения снимка",
             "terminal": (
@@ -257,19 +273,19 @@ class AnalysisTab(ttk.Frame):
             ),
             "vellus": (
                 f"Пушковые — тонкие бледные волоски (тоньше {vellus_um:.0f} мкм). "
-                f"Их рост — признак истончения. Норма: до {_NORM_VELLUS_MAX_PCT}%"
+                f"Их рост — признак истончения. Норма: до {norms.vellus_pct.high:.0f}%"
             ),
             "intermediate": (
                 f"Промежуточные ({vellus_um:.0f}–{intermediate_um:.0f} мкм) — "
                 "между пушковым и зрелым"
             ),
             "tv_ratio": (
-                f"Отношение зрелых к пушковым. Норма: ≥{_NORM_TV_RATIO_MIN}. "
+                f"Отношение зрелых к пушковым. Норма: ≥{norms.tv_ratio.low:.0f}. "
                 "Если пушковых не найдено вообще — вместо числа пишется «нет пушковых»"
             ),
             "mean_thickness": (
                 "Средний диаметр стержня по всем волосам. "
-                f"Норма: {_NORM_THICKNESS_MIN}–{_NORM_THICKNESS_MAX} мкм"
+                f"Норма: {norms.thickness_um.low:.0f}–{norms.thickness_um.high:.0f} мкм"
             ),
             "median_thickness": "Медианный диаметр стержня, устойчив к выбросам",
             "std_thickness": "Разброс толщины волос — стандартное отклонение",
@@ -279,11 +295,13 @@ class AnalysisTab(ttk.Frame):
         }
 
     def _create_norms_panel(self, parent: ttk.Frame, row: int) -> None:
-        """Создать компактный блок справочных норм.
+        """Создать компактный блок персональных справочных норм.
 
-        Показывает референсные значения (METHODOLOGY §2.2) без диагностики
-        и рекомендаций. Размещается между таблицей результатов и гистограммой;
-        по высоте не растягивается — grid-вес остаётся у гистограммы.
+        Показывает референсные диапазоны, подобранные под активного пациента
+        (пол/возраст/этнос) через ``patient_norms``; без пациента — общую норму.
+        Числа заполняет ``_refresh_norms``. Размещается между таблицей
+        результатов и гистограммой; по высоте не растягивается — grid-вес
+        остаётся у гистограммы.
 
         Args:
             parent: Родительский фрейм (правая панель).
@@ -293,24 +311,27 @@ class AnalysisTab(ttk.Frame):
         norms_frame.grid(row=row, column=0, sticky="ew", pady=(0, 5))
         norms_frame.grid_columnconfigure(0, weight=1)
 
-        summary = (
-            f"Плотность {_NORM_DENSITY_MIN}–{_NORM_DENSITY_MAX}/см² · "
-            f"Vellus ≤{_NORM_VELLUS_MAX_PCT}% · "
-            f"T/V ≥{_NORM_TV_RATIO_MIN} · "
-            f"Толщина {_NORM_THICKNESS_MIN}–{_NORM_THICKNESS_MAX} мкм"
+        # База подбора норм («Норма для: жен., 42 г., европеоид» / «общая норма»)
+        self._norms_basis_label = ttk.Label(
+            norms_frame, justify="left", wraplength=250, font=self._small_font,
         )
-        summary_label = ttk.Label(norms_frame, text=summary, justify="left", wraplength=250)
-        summary_label.grid(row=0, column=0, sticky="w")
+        self._norms_basis_label.grid(row=0, column=0, sticky="w")
+
+        # Сводка диапазонов — текст задаёт _refresh_norms
+        self._norms_summary_label = ttk.Label(
+            norms_frame, justify="left", wraplength=250,
+        )
+        self._norms_summary_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
 
         disclaimer_label = ttk.Label(
             norms_frame,
-            text="Значения справочные (METHODOLOGY §2.2), не являются диагнозом",
+            text="Значения справочные, не являются диагнозом",
             foreground="gray",
             font=self._small_font,
             justify="left",
             wraplength=250,
         )
-        disclaimer_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
+        disclaimer_label.grid(row=2, column=0, sticky="w", pady=(3, 0))
 
         # Адаптивный перенос строк под фактическую ширину панели
         last_width = {"value": 0}
@@ -320,10 +341,58 @@ class AnalysisTab(ttk.Frame):
             if width == last_width["value"]:
                 return
             last_width["value"] = width
-            summary_label.configure(wraplength=width)
+            self._norms_basis_label.configure(wraplength=width)
+            self._norms_summary_label.configure(wraplength=width)
             disclaimer_label.configure(wraplength=width)
 
         norms_frame.bind("<Configure>", _update_wraplength)
+
+    def _refresh_norms(self) -> None:
+        """Обновить блок норм и подсказки по нормам активного пациента.
+
+        Единый источник — ``core.norms`` через мостик ``patient_norms``: числа
+        подбираются под пол/возраст/этнос ``self._app.active_patient``. Без
+        пациента — общая норма (basis «общая норма»). Пороги классификации
+        Vellus/Intermediate (мкм) остаются из конфига анализа и здесь не
+        участвуют. Вызывается при построении панели и при показе результата.
+        """
+        norms = patient_norms(self._app.active_patient)
+
+        self._norms_basis_label.configure(text=f"Норма для: {norms.basis}")
+        self._norms_summary_label.configure(text=self._format_norms_summary(norms))
+
+        tooltips = self._build_result_tooltips(norms)
+        for key, tips in self._row_tooltips.items():
+            hint = tooltips.get(key)
+            if hint is None:
+                continue
+            for tip in tips:
+                tip.update_text(hint)
+
+    def on_tab_selected(self) -> None:
+        """Вызывается при переключении на вкладку — обновить нормы.
+
+        Активный пациент мог смениться на другой вкладке; блок норм и подсказки
+        должны показывать нормы текущего пациента, а не предыдущего.
+        """
+        self._refresh_norms()
+
+    def _format_norms_summary(self, norms: PatientNorms) -> str:
+        """Собрать однострочную сводку референсных диапазонов пациента.
+
+        Args:
+            norms: Персональные нормы пациента (или общая норма).
+
+        Returns:
+            Строка вида «Плотность 180–250/см² · Vellus ≤15% · T/V ≥4 ·
+            Толщина 60–90 мкм».
+        """
+        return (
+            f"Плотность {norms.density.low:.0f}–{norms.density.high:.0f}/см² · "
+            f"Vellus ≤{norms.vellus_pct.high:.0f}% · "
+            f"T/V ≥{norms.tv_ratio.low:.0f} · "
+            f"Толщина {norms.thickness_um.low:.0f}–{norms.thickness_um.high:.0f} мкм"
+        )
 
     # ──────────────────────────── Загрузка изображений ────────────────────────
 
@@ -424,6 +493,9 @@ class AnalysisTab(ttk.Frame):
             return
 
         self._analysis_result = result
+        # Синхронизировать нормы/подсказки с текущим активным пациентом:
+        # он мог смениться уже после построения вкладки.
+        self._refresh_norms()
         self._display_results(result)
         self._draw_histogram(result)
 

@@ -19,10 +19,13 @@ from typing import TYPE_CHECKING
 
 from PIL import Image, ImageTk
 
+from phototrichogram.core.norms import PatientNorms, age_from_birthdate, select_norms
 from phototrichogram.core.stats import TV_RATIO_MAX
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from phototrichogram.data.models import Patient
 
 logger = logging.getLogger(__name__)
 
@@ -558,3 +561,33 @@ def format_tv_ratio(tv_ratio: float) -> str:
     if tv_ratio >= TV_RATIO_MAX:
         return "нет пушковых"
     return f"{tv_ratio:.1f}"
+
+
+def patient_norms(patient: Patient | None, today_iso: str | None = None) -> PatientNorms:
+    """Персональные референсные нормы для пациента (единый источник для GUI).
+
+    Мостик между data-слоем (Patient) и core.norms: вычисляет возраст из даты
+    рождения и запрашивает нормы по полу, возрасту и этносу. Если пациент не
+    выбран — возвращает общую норму (ethnicity/sex/age не заданы).
+
+    Все вкладки должны брать нормы отсюда, а не хранить свои копии констант —
+    иначе показанные нормы разойдутся между собой и с логикой раскраски.
+
+    Args:
+        patient: Активный пациент или None.
+        today_iso: Текущая дата ISO (YYYY-MM-DD) для расчёта возраста; None —
+            берётся системная дата (GUI-слой вправе обращаться к часам).
+
+    Returns:
+        PatientNorms с подписью basis (например «жен., 42 г., европеоид»).
+    """
+    if today_iso is None:
+        from datetime import date
+
+        today_iso = date.today().isoformat()
+
+    if patient is None:
+        return select_norms(None, None, None)
+
+    age = age_from_birthdate(patient.birth_date, today_iso)
+    return select_norms(patient.gender, age, patient.ethnicity)

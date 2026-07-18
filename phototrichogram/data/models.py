@@ -28,6 +28,15 @@ class Patient:
         notes: Произвольные заметки врача или None.
         created_at: Дата создания записи (ISO 8601 datetime) или None.
         updated_at: Дата последнего обновления (ISO 8601 datetime) или None.
+        ethnicity: Этническая принадлежность пациента (самоопределение) или None,
+            если не указана. Значение — произвольная строка-код; data-слой не
+            накладывает ограничений и не импортирует core (изоляция слоёв,
+            см. import-linter контракт в pyproject.toml). Согласованные коды
+            заданы в phototrichogram.core.norms.Ethnicity и соответствуют по
+            значению (а не по импорту): 'caucasian' (европеоид), 'hispanic'
+            (латиноамериканец), 'african' (африканец), 'east_asian'
+            (восточноазиат), 'south_asian' (южноазиат), 'unspecified'
+            (не указан). Старые записи и записи без явного выбора — None.
     """
 
     id: int | None
@@ -38,6 +47,7 @@ class Patient:
     notes: str | None
     created_at: str | None
     updated_at: str | None
+    ethnicity: str | None = None
 
 
 @dataclass(frozen=True)

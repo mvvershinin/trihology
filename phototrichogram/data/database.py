@@ -146,6 +146,10 @@ _MIGRATIONS: list[tuple[int, str]] = [
         8,
         "CREATE INDEX IF NOT EXISTS idx_measurements_zone  ON measurements(session_id, zone)",
     ),
+    (
+        9,
+        "ALTER TABLE patients ADD COLUMN ethnicity TEXT",
+    ),
 ]
 
 
@@ -253,9 +257,13 @@ class Database:
                 raise ValueError(f"Некорректная версия миграции: {version}")
             logger.info("Применяю миграцию v%d", version)
             try:
+                # PRAGMA user_version обновляется в ТОЙ ЖЕ транзакции, что и DDL:
+                # иначе при падении процесса между ними неидемпотентная миграция
+                # (ADD COLUMN) повторится при следующем старте и упадёт с
+                # "duplicate column", ломая открытие БД.
                 with conn:
                     conn.execute(sql)
-                conn.execute(f"PRAGMA user_version={int(version)}")
+                    conn.execute(f"PRAGMA user_version={int(version)}")
             except sqlite3.Error as exc:
                 logger.error("Ошибка миграции v%d: %s", version, exc)
                 raise
@@ -276,6 +284,7 @@ class Database:
             notes=row["notes"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            ethnicity=row["ethnicity"],
         )
 
     def _row_to_calibration(self, row: sqlite3.Row) -> Calibration:
@@ -340,6 +349,7 @@ class Database:
         gender: str | None = None,
         diagnosis: str | None = None,
         notes: str | None = None,
+        ethnicity: str | None = None,
     ) -> Patient:
         """Создание нового профиля пациента.
 
@@ -349,6 +359,8 @@ class Database:
             gender: Пол ('M', 'F') или None.
             diagnosis: Предварительный диагноз или None.
             notes: Произвольные заметки или None.
+            ethnicity: Этническая принадлежность (код, см. Patient.ethnicity)
+                или None, если не указана.
 
         Returns:
             Объект Patient с заполненным id и created_at.
@@ -367,10 +379,10 @@ class Database:
                 cursor = conn.execute(
                     """
                     INSERT INTO patients (name, birth_date, gender, diagnosis, notes,
-                                         created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                         ethnicity, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (name.strip(), birth_date, gender, diagnosis, notes, now, now),
+                    (name.strip(), birth_date, gender, diagnosis, notes, ethnicity, now, now),
                 )
                 patient_id = cursor.lastrowid
         except sqlite3.Error as exc:
@@ -386,6 +398,7 @@ class Database:
             notes=notes,
             created_at=now,
             updated_at=now,
+            ethnicity=ethnicity,
         )
         logger.info("Создан пациент id=%d: %s", patient_id, name)
         return patient
@@ -426,7 +439,7 @@ class Database:
     def update_patient(self, patient_id: int, **kwargs: Any) -> bool:
         """Обновление полей пациента.
 
-        Допустимые поля: name, birth_date, gender, diagnosis, notes.
+        Допустимые поля: name, birth_date, gender, diagnosis, notes, ethnicity.
         Поля id, created_at, updated_at изменить нельзя — будут проигнорированы.
 
         Args:
@@ -440,7 +453,7 @@ class Database:
             sqlite3.Error: При ошибке обновления.
             ValueError: Если kwargs пустой или содержит недопустимые поля.
         """
-        allowed = {"name", "birth_date", "gender", "diagnosis", "notes"}
+        allowed = {"name", "birth_date", "gender", "diagnosis", "notes", "ethnicity"}
         filtered = {k: v for k, v in kwargs.items() if k in allowed}
 
         if not filtered:

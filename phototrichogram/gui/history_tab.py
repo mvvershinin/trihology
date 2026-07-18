@@ -2,20 +2,28 @@
 Вкладка истории измерений и динамики.
 
 Содержит HistoryTab: таблица измерений активного пациента,
-графики динамики плотности и T/V ratio по зонам.
+графики динамики плотности и T/V ratio по зонам с полосами нормы
+и интерактивными аннотациями по клику на точку.
 
 Layout:
 - Сверху: имя пациента + кнопка «Обновить»
 - Середина: Treeview со всеми измерениями
 - Снизу: два графика matplotlib (плотность, T/V ratio)
 
+Полосы нормы берутся из единого мостика ``gui.widgets.patient_norms``
+(персональные нормы активного пациента). Клик по точке графика показывает
+matplotlib-аннотацию с числовыми показателями измерения (без диагнозов).
+
 НЕ импортирует cv2 — чисто GUI-слой.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import math
 import tkinter as tk
+from dataclasses import dataclass
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any
 
@@ -25,10 +33,16 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+from phototrichogram.core.stats import TV_RATIO_MAX
 from phototrichogram.data.models import Measurement
-from phototrichogram.gui.widgets import format_tv_ratio
+from phototrichogram.gui.widgets import format_tv_ratio, patient_norms
 
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.backend_bases import MouseEvent
+    from matplotlib.text import Annotation
+
+    from phototrichogram.core.norms import PatientNorms
     from phototrichogram.gui.app import App
 
 logger = logging.getLogger(__name__)
@@ -48,13 +62,56 @@ _ZONE_LABELS: dict[str, str] = {
     "O": "O (затылочная)",
 }
 
+# Зоны в стандартном порядке обхода
+_ZONE_ORDER: tuple[str, ...] = ("F", "P", "T", "O")
+
+# Полупрозрачная зелёная полоса нормы
+_NORM_COLOR: str = "#4CAF50"
+_NORM_ALPHA: float = 0.10
+
+# Радиус «прицеливания» по точке при клике (в пикселях экрана)
+_PICK_RADIUS_PX: float = 20.0
+
+# Тип точки серии для поиска ближайшей при клике: (x_данные, y_данные, инфо)
+_SeriesPoint = tuple[float, float, "_PointInfo"]
+
+
+@dataclass(frozen=True)
+class _PointInfo:
+    """Числовые показатели точки графика для аннотации по клику.
+
+    Хранит только числа (без диагностических оценок): аннотация показывает
+    дату, зону и измеренные параметры.
+    """
+
+    zone: str
+    date: str
+    density: float
+    vellus_pct: float
+    tv_ratio: float
+    mean_thickness_um: float
+
+
+@dataclass(frozen=True)
+class _ZoneSeries:
+    """Серия измерений одной зоны для построения графика динамики.
+
+    Списки ``dates`` и ``measurements`` параллельны (один индекс — одна точка)
+    и отсортированы по дате возрастанию (как отдаёт get_zone_history).
+    """
+
+    zone: str
+    dates: list[str]
+    measurements: list[Measurement]
+
 
 class HistoryTab(ttk.Frame):
     """Вкладка истории измерений и динамики.
 
     Отображает:
     - Таблицу всех измерений активного пациента
-    - Графики динамики плотности и T/V ratio по зонам
+    - Графики динамики плотности и T/V ratio по зонам с полосами нормы
+    - Аннотацию с числами по клику на точку графика
     """
 
     def __init__(self, parent: tk.Widget, app: App, **kwargs: Any) -> None:
@@ -158,6 +215,11 @@ class HistoryTab(ttk.Frame):
         charts_frame.grid_rowconfigure(0, weight=1)
         charts_frame.grid_columnconfigure(0, weight=1)
 
+        # Состояние интерактивных графиков
+        self._annotation: Annotation | None = None
+        self._density_points: list[_SeriesPoint] = []
+        self._tv_points: list[_SeriesPoint] = []
+
         # Figure с двумя subplot'ами
         self._figure = Figure(figsize=(10, 3.5), dpi=90)
         self._figure.set_facecolor("#f0f0f0")
@@ -176,6 +238,8 @@ class HistoryTab(ttk.Frame):
         self._canvas_widget.get_tk_widget().grid(  # type: ignore[no-untyped-call]
             row=0, column=0, sticky="nsew",
         )
+        # Клик по графику — показать/убрать аннотацию точки
+        self._canvas_widget.mpl_connect("button_press_event", self._on_chart_click)
 
         # Плейсхолдер для графиков
         self._charts_placeholder = ttk.Label(
@@ -275,13 +339,17 @@ class HistoryTab(ttk.Frame):
     # ──────────────────────────── Графики ──────────────────────────────────────
 
     def _clear_charts(self) -> None:
-        """Очистить графики."""
+        """Очистить графики, снять аннотацию и сбросить данные точек."""
+        self._clear_annotation()
+        self._density_points = []
+        self._tv_points = []
+
         self._ax_density.clear()
         self._ax_tv.clear()
 
-        self._ax_density.set_title("Плотность (волос/см\u00b2)", fontsize=10)
+        self._ax_density.set_title("Плотность (волос/см²)", fontsize=10)
         self._ax_density.set_xlabel("Дата", fontsize=9)
-        self._ax_density.set_ylabel("волос/см\u00b2", fontsize=9)
+        self._ax_density.set_ylabel("волос/см²", fontsize=9)
 
         self._ax_tv.set_title("T/V соотношение", fontsize=10)
         self._ax_tv.set_xlabel("Дата", fontsize=9)
@@ -289,19 +357,22 @@ class HistoryTab(ttk.Frame):
 
         self._canvas_widget.draw_idle()  # type: ignore[no-untyped-call]
 
-    def _update_charts(self, patient_id: int) -> None:
-        """Обновить графики динамики для пациента.
+    def _load_series(self, patient_id: int) -> list[_ZoneSeries]:
+        """Загрузить серии измерений по зонам для пациента.
+
+        Для каждой точки берётся дата соответствующей сессии (fallback —
+        дата создания измерения).
 
         Args:
             patient_id: ID пациента.
+
+        Returns:
+            Непустые серии по зонам в порядке F/P/T/O.
         """
         db = self._app.db
-        has_data = False
+        series: list[_ZoneSeries] = []
 
-        self._ax_density.clear()
-        self._ax_tv.clear()
-
-        for zone_code in ["F", "P", "T", "O"]:
+        for zone_code in _ZONE_ORDER:
             try:
                 history = db.get_zone_history(patient_id, zone_code)
             except Exception as e:
@@ -311,65 +382,313 @@ class HistoryTab(ttk.Frame):
             if not history:
                 continue
 
-            # Получить даты сессий для этих измерений
             dates: list[str] = []
-            densities: list[float] = []
-            tv_ratios: list[float] = []
-
+            measurements: list[Measurement] = []
             for m in history:
-                # Получаем дату из сессии
                 session = db.get_session(m.session_id)
-                date_str = session.date if session else (m.created_at[:10] if m.created_at else "")
+                if session is not None:
+                    date_str = session.date
+                elif m.created_at:
+                    date_str = m.created_at[:10]
+                else:
+                    date_str = "--"
                 dates.append(date_str)
-                densities.append(m.density_per_cm2)
-                tv_ratios.append(m.tv_ratio)
+                measurements.append(m)
 
-            if not dates:
-                continue
+            if dates:
+                series.append(_ZoneSeries(zone_code, dates, measurements))
 
-            has_data = True
-            color = _ZONE_COLORS.get(zone_code, "#333333")
-            label = _ZONE_LABELS.get(zone_code, zone_code)
+        return series
 
-            self._ax_density.plot(
-                dates, densities,
-                marker="o", markersize=5,
-                color=color, label=label,
-                linewidth=1.5,
-            )
+    def _update_charts(self, patient_id: int) -> None:
+        """Обновить графики динамики для пациента.
 
-            self._ax_tv.plot(
-                dates, tv_ratios,
-                marker="s", markersize=5,
-                color=color, label=label,
-                linewidth=1.5,
-            )
+        Строит серии по зонам, полосы нормы (из единого мостика
+        patient_norms) и подготавливает точки для аннотаций по клику.
+        Автомасштаб оси ведётся по данным и норме, чтобы данные оставались
+        читаемы (для T/V «нет пушковых» = TV_RATIO_MAX обрабатывается как
+        сентинел и рисуется у верхней кромки).
 
-        if has_data:
-            self._charts_placeholder.grid_remove()
+        Args:
+            patient_id: ID пациента.
+        """
+        self._clear_annotation()
+        self._density_points = []
+        self._tv_points = []
 
-            self._ax_density.set_title("Плотность (волос/см\u00b2)", fontsize=10)
-            self._ax_density.set_xlabel("Дата", fontsize=9)
-            self._ax_density.set_ylabel("волос/см\u00b2", fontsize=9)
-            self._ax_density.legend(fontsize=8, loc="best")
-            self._ax_density.tick_params(axis="x", rotation=30, labelsize=8)
-            self._ax_density.grid(True, alpha=0.3)
-
-            self._ax_tv.set_title("T/V соотношение", fontsize=10)
-            self._ax_tv.set_xlabel("Дата", fontsize=9)
-            self._ax_tv.set_ylabel("T/V", fontsize=9)
-            self._ax_tv.legend(fontsize=8, loc="best")
-            self._ax_tv.tick_params(axis="x", rotation=30, labelsize=8)
-            self._ax_tv.grid(True, alpha=0.3)
-
-            self._figure.tight_layout()
-        else:
+        series = self._load_series(patient_id)
+        if not series:
             self._charts_placeholder.grid()
             self._charts_placeholder.lift()
             self._charts_placeholder.config(text="Нет данных для построения графиков")
             self._clear_charts()
+            return
 
+        self._charts_placeholder.grid_remove()
+
+        self._ax_density.clear()
+        self._ax_tv.clear()
+
+        norms = patient_norms(self._app.active_patient)
+        all_dates = sorted({d for s in series for d in s.dates})
+        date_index = {d: i for i, d in enumerate(all_dates)}
+
+        # Параметры оси T/V с учётом сентинела «нет пушковых» (TV_RATIO_MAX)
+        real_tv = [
+            m.tv_ratio
+            for s in series
+            for m in s.measurements
+            if m.tv_ratio < TV_RATIO_MAX
+        ]
+        tv_top = max([*real_tv, norms.tv_ratio.high])
+        tv_sentinel_y = tv_top * 1.10
+        tv_y_top = tv_top * 1.20
+
+        for s in series:
+            xs = [float(date_index[d]) for d in s.dates]
+            color = _ZONE_COLORS.get(s.zone, "#333333")
+            label = _ZONE_LABELS.get(s.zone, s.zone)
+
+            densities = [m.density_per_cm2 for m in s.measurements]
+            self._ax_density.plot(
+                xs, densities,
+                marker="o", markersize=5, color=color, label=label, linewidth=1.5,
+            )
+
+            tv_plot = [
+                m.tv_ratio if m.tv_ratio < TV_RATIO_MAX else tv_sentinel_y
+                for m in s.measurements
+            ]
+            self._ax_tv.plot(
+                xs, tv_plot,
+                marker="s", markersize=5, color=color, label=label, linewidth=1.5,
+            )
+
+            for x, date, m in zip(xs, s.dates, s.measurements, strict=True):
+                info = _PointInfo(
+                    zone=s.zone,
+                    date=date,
+                    density=m.density_per_cm2,
+                    vellus_pct=m.vellus_pct,
+                    tv_ratio=m.tv_ratio,
+                    mean_thickness_um=m.mean_thickness_um,
+                )
+                self._density_points.append((x, m.density_per_cm2, info))
+                tv_y = m.tv_ratio if m.tv_ratio < TV_RATIO_MAX else tv_sentinel_y
+                self._tv_points.append((x, tv_y, info))
+
+        self._finalize_density_axis(norms, all_dates)
+        self._finalize_tv_axis(norms, all_dates, tv_y_top)
+
+        self._figure.tight_layout()
         self._canvas_widget.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _finalize_density_axis(self, norms: PatientNorms, all_dates: list[str]) -> None:
+        """Оформить ось плотности: полоса нормы, автомасштаб, подписи.
+
+        Args:
+            norms: Персональные нормы пациента.
+            all_dates: Общий отсортированный список дат (для оси X).
+        """
+        ax = self._ax_density
+        low = norms.density.low
+        high = norms.density.high
+
+        dens_vals = [y for _, y, _ in self._density_points]
+        lo = min([*dens_vals, low])
+        hi = max([*dens_vals, high])
+        pad = max((hi - lo) * 0.08, 5.0)
+        ax.set_ylim(max(0.0, lo - pad), hi + pad)
+
+        ax.axhspan(
+            low, high,
+            color=_NORM_COLOR, alpha=_NORM_ALPHA, zorder=0,
+            label=f"норма: {norms.basis}",
+        )
+
+        self._apply_date_axis(ax, all_dates)
+        ax.set_title("Плотность (волос/см²)", fontsize=10)
+        ax.set_xlabel("Дата", fontsize=9)
+        ax.set_ylabel("волос/см²", fontsize=9)
+        ax.legend(fontsize=8, loc="best")
+        ax.grid(True, alpha=0.3)
+
+    def _finalize_tv_axis(
+        self, norms: PatientNorms, all_dates: list[str], y_top: float,
+    ) -> None:
+        """Оформить ось T/V: полоса нормы от low вверх, автомасштаб, подписи.
+
+        Args:
+            norms: Персональные нормы пациента.
+            all_dates: Общий отсортированный список дат (для оси X).
+            y_top: Верхняя граница оси T/V (данные координаты).
+        """
+        ax = self._ax_tv
+        low = norms.tv_ratio.low
+
+        ax.set_ylim(0.0, y_top)
+        ax.axhspan(
+            low, y_top,
+            color=_NORM_COLOR, alpha=_NORM_ALPHA, zorder=0,
+            label=f"норма: {norms.basis}",
+        )
+        ax.axhline(low, color=_NORM_COLOR, linestyle="--", linewidth=0.9, alpha=0.7)
+
+        self._apply_date_axis(ax, all_dates)
+        ax.set_title("T/V соотношение", fontsize=10)
+        ax.set_xlabel("Дата", fontsize=9)
+        ax.set_ylabel("T/V", fontsize=9)
+        ax.legend(fontsize=8, loc="best")
+        ax.grid(True, alpha=0.3)
+
+    def _apply_date_axis(self, ax: Axes, all_dates: list[str]) -> None:
+        """Единая настройка оси дат: тики, подписи, границы.
+
+        Args:
+            ax: Ось для настройки.
+            all_dates: Отсортированный список дат (позиции 0..N-1).
+        """
+        n = len(all_dates)
+        ax.set_xticks(list(range(n)))
+        ax.set_xticklabels(all_dates, rotation=30, ha="right", fontsize=8)
+        ax.set_xlim(-0.6, n - 0.4)
+        ax.tick_params(axis="y", labelsize=8)
+
+    # ──────────────────────────── Интерактивность ─────────────────────────────
+
+    def _on_chart_click(self, event: MouseEvent) -> None:
+        """Клик по графику: показать аннотацию точки либо убрать текущую.
+
+        Ищет ближайшую точку на оси, по которой кликнули; если она в радиусе
+        прицеливания — показывает аннотацию с числами измерения, иначе
+        (пустое место или клик вне осей) — убирает текущую аннотацию.
+
+        Args:
+            event: Событие мыши matplotlib.
+        """
+        ax = event.inaxes
+        if ax is None or event.x is None or event.y is None:
+            self._dismiss_annotation()
+            return
+
+        if ax is self._ax_density:
+            points = self._density_points
+        elif ax is self._ax_tv:
+            points = self._tv_points
+        else:
+            self._dismiss_annotation()
+            return
+
+        nearest = self._nearest_point(ax, points, float(event.x), float(event.y))
+        if nearest is None:
+            self._dismiss_annotation()
+            return
+
+        x_data, y_data, info = nearest
+        self._show_annotation(ax, x_data, y_data, info)
+
+    def _nearest_point(
+        self,
+        ax: Axes,
+        points: list[_SeriesPoint],
+        px: float,
+        py: float,
+    ) -> _SeriesPoint | None:
+        """Ближайшая к (px, py) точка серии в пределах радиуса прицеливания.
+
+        Args:
+            ax: Ось, на которой ищем точку.
+            points: Точки серии (x_данные, y_данные, инфо).
+            px: X-координата клика в пикселях экрана.
+            py: Y-координата клика в пикселях экрана.
+
+        Returns:
+            Ближайшая точка или None, если ни одна не попала в радиус.
+        """
+        best: _SeriesPoint | None = None
+        best_dist = _PICK_RADIUS_PX
+        for x_data, y_data, info in points:
+            disp = ax.transData.transform((x_data, y_data))
+            dist = math.hypot(float(disp[0]) - px, float(disp[1]) - py)
+            if dist <= best_dist:
+                best_dist = dist
+                best = (x_data, y_data, info)
+        return best
+
+    def _show_annotation(
+        self, ax: Axes, x_data: float, y_data: float, info: _PointInfo,
+    ) -> None:
+        """Показать аннотацию у точки, заменив предыдущую.
+
+        Подпись отводится внутрь области осей (направление смещения зависит
+        от положения точки), чтобы текст не уходил за край графика.
+
+        Args:
+            ax: Ось, на которой находится точка.
+            x_data: X-координата точки (данные).
+            y_data: Y-координата точки (данные).
+            info: Числовые показатели точки.
+        """
+        self._clear_annotation()
+
+        # Положение точки в долях оси → сторона смещения подписи
+        disp = ax.transData.transform((x_data, y_data))
+        frac = ax.transAxes.inverted().transform(disp)
+        fx, fy = float(frac[0]), float(frac[1])
+        dx = 14.0 if fx < 0.5 else -14.0
+        dy = 14.0 if fy < 0.5 else -14.0
+        ha = "left" if fx < 0.5 else "right"
+        va = "bottom" if fy < 0.5 else "top"
+
+        self._annotation = ax.annotate(
+            self._format_point_text(info),
+            xy=(x_data, y_data),
+            xytext=(dx, dy),
+            textcoords="offset points",
+            fontsize=8,
+            ha=ha,
+            va=va,
+            zorder=20,
+            bbox={
+                "boxstyle": "round,pad=0.4",
+                "facecolor": "#FFFDE7",
+                "edgecolor": "#9E9E9E",
+                "alpha": 0.95,
+            },
+            arrowprops={"arrowstyle": "-", "color": "#616161", "linewidth": 0.8},
+        )
+        self._canvas_widget.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _format_point_text(self, info: _PointInfo) -> str:
+        """Текст аннотации точки — только числа, без диагноза.
+
+        Args:
+            info: Числовые показатели точки.
+
+        Returns:
+            Многострочный текст: дата, зона и измеренные параметры.
+        """
+        zone_label = _ZONE_LABELS.get(info.zone, info.zone)
+        return (
+            f"{info.date} — {zone_label}\n"
+            f"Плотность: {info.density:.0f} волос/см²\n"
+            f"Vellus: {info.vellus_pct:.1f}%\n"
+            f"T/V: {format_tv_ratio(info.tv_ratio)}\n"
+            f"Толщина: {info.mean_thickness_um:.1f} мкм"
+        )
+
+    def _dismiss_annotation(self) -> None:
+        """Убрать аннотацию и перерисовать (если она была)."""
+        if self._annotation is not None:
+            self._clear_annotation()
+            self._canvas_widget.draw_idle()  # type: ignore[no-untyped-call]
+
+    def _clear_annotation(self) -> None:
+        """Снять текущую аннотацию без перерисовки."""
+        if self._annotation is not None:
+            with contextlib.suppress(NotImplementedError, ValueError, AttributeError):
+                self._annotation.remove()
+            self._annotation = None
 
     # ──────────────────────────── Событие вкладки ─────────────────────────────
 

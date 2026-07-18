@@ -6,7 +6,7 @@
 
 Layout:
 - Слева: поиск + Treeview со списком пациентов + кнопка «Новый»
-- Справа: форма редактирования (имя, дата рождения, пол, заметки)
+- Справа: форма редактирования (имя, дата рождения, пол, этнос, заметки)
 
 НЕ импортирует cv2 — чисто GUI-слой.
 """
@@ -18,6 +18,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from phototrichogram.core.norms import Ethnicity
 from phototrichogram.data.models import Patient
 
 if TYPE_CHECKING:
@@ -30,6 +31,36 @@ _GENDER_OPTIONS = ("--", "М", "Ж")
 _GENDER_TO_DB = {"--": None, "М": "M", "Ж": "F"}
 _GENDER_FROM_DB = {None: "--", "M": "М", "F": "Ж"}
 
+# Отображение этнической принадлежности.
+# Русские подписи ↔ коды phototrichogram.core.norms.Ethnicity: подписи строятся
+# из перечисления, поэтому DB-коды (Ethnicity.*.value) совпадают с core.norms
+# «точь-в-точь». «Не указан» соответствует отсутствию данных — в data-слое это
+# None; core.norms трактует и None, и строку 'unspecified' одинаково — как
+# Ethnicity.UNSPECIFIED (см. Ethnicity.from_code).
+_ETHNICITY_UNSPECIFIED_LABEL = "Не указан"
+
+# Явные (кроме UNSPECIFIED) варианты в порядке их показа в выпадающем списке.
+_ETHNICITY_LABELS: dict[Ethnicity, str] = {
+    Ethnicity.CAUCASIAN: "Европеоид",
+    Ethnicity.HISPANIC: "Латиноамериканец",
+    Ethnicity.AFRICAN: "Африканец",
+    Ethnicity.EAST_ASIAN: "Восточноазиат",
+    Ethnicity.SOUTH_ASIAN: "Южноазиат",
+}
+_ETHNICITY_OPTIONS: tuple[str, ...] = (
+    _ETHNICITY_UNSPECIFIED_LABEL,
+    *_ETHNICITY_LABELS.values(),
+)
+_ETHNICITY_TO_DB: dict[str, str | None] = {
+    _ETHNICITY_UNSPECIFIED_LABEL: None,
+    **{label: eth.value for eth, label in _ETHNICITY_LABELS.items()},
+}
+_ETHNICITY_FROM_DB: dict[str | None, str] = {
+    None: _ETHNICITY_UNSPECIFIED_LABEL,
+    Ethnicity.UNSPECIFIED.value: _ETHNICITY_UNSPECIFIED_LABEL,
+    **{eth.value: label for eth, label in _ETHNICITY_LABELS.items()},
+}
+
 
 class _PatientFormData(TypedDict):
     """Данные формы пациента (имя обязательно, остальное опционально)."""
@@ -37,6 +68,7 @@ class _PatientFormData(TypedDict):
     name: str
     birth_date: str | None
     gender: str | None
+    ethnicity: str | None
     notes: str | None
 
 
@@ -178,6 +210,21 @@ class PatientsTab(ttk.Frame):
         gender_combo.grid(row=row, column=1, sticky="w", padx=(5, 0), pady=5)
         row += 1
 
+        # Этническая принадлежность
+        ttk.Label(card_frame, text="Этническая принадлежность:").grid(
+            row=row, column=0, sticky="w", pady=5,
+        )
+        self._ethnicity_var = tk.StringVar(value=_ETHNICITY_UNSPECIFIED_LABEL)
+        ethnicity_combo = ttk.Combobox(
+            card_frame,
+            textvariable=self._ethnicity_var,
+            values=_ETHNICITY_OPTIONS,
+            state="readonly",
+            width=18,
+        )
+        ethnicity_combo.grid(row=row, column=1, sticky="w", padx=(5, 0), pady=5)
+        row += 1
+
         # Заметки
         ttk.Label(card_frame, text="Заметки:").grid(row=row, column=0, sticky="nw", pady=5)
         self._notes_text = tk.Text(card_frame, height=5, width=30, wrap="word")
@@ -316,6 +363,9 @@ class PatientsTab(ttk.Frame):
         self._name_var.set(patient.name)
         self._birth_var.set(patient.birth_date or "")
         self._gender_var.set(_GENDER_FROM_DB.get(patient.gender, "--"))
+        self._ethnicity_var.set(
+            _ETHNICITY_FROM_DB.get(patient.ethnicity, _ETHNICITY_UNSPECIFIED_LABEL),
+        )
 
         self._notes_text.delete("1.0", "end")
         if patient.notes:
@@ -341,6 +391,7 @@ class PatientsTab(ttk.Frame):
         self._name_var.set("")
         self._birth_var.set("")
         self._gender_var.set("--")
+        self._ethnicity_var.set(_ETHNICITY_UNSPECIFIED_LABEL)
         self._notes_text.delete("1.0", "end")
         self._info_var.set("")
         self._delete_btn.config(state="disabled")
@@ -359,12 +410,14 @@ class PatientsTab(ttk.Frame):
         name = self._name_var.get().strip()
         birth_date = self._birth_var.get().strip() or None
         gender = _GENDER_TO_DB.get(self._gender_var.get())
+        ethnicity = _ETHNICITY_TO_DB.get(self._ethnicity_var.get())
         notes = self._notes_text.get("1.0", "end").strip() or None
 
         return {
             "name": name,
             "birth_date": birth_date,
             "gender": gender,
+            "ethnicity": ethnicity,
             "notes": notes,
         }
 

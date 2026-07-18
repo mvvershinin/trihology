@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from phototrichogram.data.database import Database
+from phototrichogram.data.database import _MIGRATIONS, Database
 
 # ---------------------------------------------------------------------------
 # Вспомогательные фабрики
@@ -65,7 +65,7 @@ class TestMigrations:
 
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
 
-        assert version == 8
+        assert version == 9
         db.close()
 
     def test_reopening_db_is_idempotent(self, tmp_path: Path) -> None:
@@ -77,8 +77,62 @@ class TestMigrations:
         db2 = Database(db_path)
         version = db2._conn.execute("PRAGMA user_version").fetchone()[0]
 
-        assert version == 8
+        assert version == 9
         db2.close()
+
+    def test_fresh_db_has_ethnicity_column(self, temp_db: Database) -> None:
+        """Свежая БД сразу содержит колонку patients.ethnicity (миграция v9)."""
+        columns = {
+            row["name"]
+            for row in temp_db._conn.execute("PRAGMA table_info(patients)").fetchall()
+        }
+
+        assert "ethnicity" in columns
+
+    def test_legacy_db_without_ethnicity_column_is_migrated(self, tmp_path: Path) -> None:
+        """БД, созданная до появления ethnicity (версия схемы 8), догоняет до v9.
+
+        Схема воспроизводится вручную из миграций 1..8 (без 9) -- имитация
+        реальной базы пользователя, обновившегося с более старой версии
+        приложения. Открытие через Database должно добавить колонку
+        ethnicity без потери существующих данных, а старые пациенты --
+        получить ethnicity = NULL (в модели -- None).
+        """
+        db_path = tmp_path / "legacy.db"
+
+        raw = sqlite3.connect(str(db_path))
+        try:
+            for version, sql in _MIGRATIONS:
+                if version >= 9:
+                    continue
+                raw.execute(sql)
+            raw.execute(
+                "INSERT INTO patients (name, gender) VALUES (?, ?)",
+                ("Легаси Пациент", "F"),
+            )
+            raw.commit()
+            raw.execute("PRAGMA user_version=8")
+            raw.commit()
+        finally:
+            raw.close()
+
+        db = Database(db_path)
+        try:
+            version = db._conn.execute("PRAGMA user_version").fetchone()[0]
+            assert version == 9
+
+            columns = {
+                row["name"]
+                for row in db._conn.execute("PRAGMA table_info(patients)").fetchall()
+            }
+            assert "ethnicity" in columns
+
+            patients = db.get_all_patients()
+            assert len(patients) == 1
+            assert patients[0].name == "Легаси Пациент"
+            assert patients[0].ethnicity is None
+        finally:
+            db.close()
 
     def test_foreign_keys_enabled(self, temp_db: Database) -> None:
         """PRAGMA foreign_keys включена -- целостность данных обеспечена."""
@@ -132,6 +186,31 @@ class TestPatientCrud:
 
         assert loaded == created
 
+    def test_add_patient_with_ethnicity(self, temp_db: Database) -> None:
+        """Этническая принадлежность сохраняется при создании пациента."""
+        patient = temp_db.add_patient(name="Ким Мин Су", ethnicity="east_asian")
+
+        assert patient.ethnicity == "east_asian"
+
+    def test_add_patient_ethnicity_defaults_to_none(self, temp_db: Database) -> None:
+        """Без явного указания этноса поле -- None (старые вызовы add_patient не ломаются)."""
+        patient = temp_db.add_patient(name="Без этноса", gender="M")
+
+        assert patient.ethnicity is None
+
+    def test_get_patient_roundtrip_preserves_ethnicity(self, temp_db: Database) -> None:
+        """Загруженный пациент сохраняет ethnicity -- как заданное значение, так и None."""
+        with_ethnicity = temp_db.add_patient(name="С этносом", ethnicity="african")
+        without_ethnicity = temp_db.add_patient(name="Без этноса поле")
+
+        loaded_with = temp_db.get_patient(with_ethnicity.id)
+        loaded_without = temp_db.get_patient(without_ethnicity.id)
+
+        assert loaded_with == with_ethnicity
+        assert loaded_with.ethnicity == "african"
+        assert loaded_without == without_ethnicity
+        assert loaded_without.ethnicity is None
+
     def test_get_patient_not_found_returns_none(self, temp_db: Database) -> None:
         """Несуществующий id -> None."""
         assert temp_db.get_patient(99999) is None
@@ -161,6 +240,28 @@ class TestPatientCrud:
         assert reloaded.name == "Новое Имя"
         assert reloaded.diagnosis == "AGA"
         assert reloaded.gender == "M"  # не изменялось
+
+    def test_update_patient_sets_ethnicity(self, temp_db: Database) -> None:
+        """Обновление устанавливает этническую принадлежность, не трогая остальные поля."""
+        patient = temp_db.add_patient(name="Тест Этнос", gender="F")
+
+        updated = temp_db.update_patient(patient.id, ethnicity="hispanic")
+
+        assert updated is True
+        reloaded = temp_db.get_patient(patient.id)
+        assert reloaded.ethnicity == "hispanic"
+        assert reloaded.name == "Тест Этнос"  # не изменялось
+        assert reloaded.gender == "F"  # не изменялось
+
+    def test_update_patient_can_reset_ethnicity_to_none(self, temp_db: Database) -> None:
+        """Явная передача ethnicity=None сбрасывает поле в NULL."""
+        patient = temp_db.add_patient(name="Сброс этноса", ethnicity="caucasian")
+
+        updated = temp_db.update_patient(patient.id, ethnicity=None)
+
+        assert updated is True
+        reloaded = temp_db.get_patient(patient.id)
+        assert reloaded.ethnicity is None
 
     def test_update_patient_not_found_returns_false(self, temp_db: Database) -> None:
         """Обновление несуществующего пациента возвращает False."""
@@ -243,6 +344,15 @@ class TestSearchPatients:
         results = temp_db.search_patients("_ванова")
 
         assert results == []
+
+    def test_search_results_carry_ethnicity_field(self, temp_db: Database) -> None:
+        """Поиск не ломается новым полем -- ethnicity возвращается вместе с остальными."""
+        temp_db.add_patient(name="Иванова Этнос Тест", ethnicity="caucasian")
+
+        results = temp_db.search_patients("Этнос Тест")
+
+        assert len(results) == 1
+        assert results[0].ethnicity == "caucasian"
 
 
 # ---------------------------------------------------------------------------

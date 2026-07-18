@@ -25,10 +25,12 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from phototrichogram.gui.widgets import ToolTip, format_tv_ratio
+from phototrichogram.core.norms import NormStatus
+from phototrichogram.gui.widgets import ToolTip, format_tv_ratio, patient_norms
 
 if TYPE_CHECKING:
     from phototrichogram.core.analyzer import AnalysisResult
+    from phototrichogram.core.norms import PatientNorms
     from phototrichogram.gui.app import App
 
 logger = logging.getLogger(__name__)
@@ -60,28 +62,16 @@ _STATUS_COLORS: dict[str, str] = {
     "neutral": "#9E9E9E",    # серый — нет данных / контроль
 }
 
-# Референсные нормы из METHODOLOGY.md §2.2
-_DENSITY_NORM_MIN = 150.0       # волос/см²
-_DENSITY_BORDERLINE_MIN = 100.0
-_VELLUS_PCT_NORM_MAX = 20.0     # %
-_VELLUS_PCT_BORDERLINE_MAX = 30.0
-_TV_RATIO_NORM_MIN = 4.0
-_TV_RATIO_BORDERLINE_MIN = 2.0
-_DENSITY_DIFF_BORDERLINE = -15.0  # %
-_DENSITY_DIFF_BAD = -30.0
-
-# Справочный диапазон средней толщины волоса, мкм (METHODOLOGY.md §2.2).
-# Нижняя граница 40 = порог нормы Terminal (§2.2: «Толщина Terminal > 40 мкм»).
-# Верхняя граница 80 мкм — клинический ориентир средней толщины
-# терминального волоса (в таблице §2.2 явно не задана). Значение используется
-# ТОЛЬКО в справочном блоке; в раскраске индикаторов (_assess_status)
-# не участвует, поэтому вынесено отдельными константами и не дублирует
-# пороги раскраски выше.
-_THICKNESS_MEAN_NORM_MIN_UM = 40.0
-_THICKNESS_MEAN_NORM_MAX_UM = 80.0
+# Пороги сравнения зоны с контрольной затылочной зоной O (относительная
+# разница плотности, %). Это НЕ референсные нормы показателей — те приходят
+# из core.norms через patient_norms(активный пациент). Здесь остаются только
+# пороги межзонального сравнения, специфичные для этой вкладки.
+_DENSITY_DIFF_BORDERLINE = -15.0  # %, погранично: зона ниже контроля
+_DENSITY_DIFF_BAD = -30.0         # %, отклонение: зона заметно ниже контроля
 
 
 def _assess_status(
+    norms: PatientNorms,
     density: float,
     vellus_pct: float,
     tv_ratio: float,
@@ -89,9 +79,14 @@ def _assess_status(
 ) -> str:
     """Оценка состояния зоны по числовым показателям.
 
-    Возвращает цветовой статус на основе метрик, без привязки к диагнозам.
+    Статус каждого показателя берётся из персональных норм пациента
+    (``NormRange.status`` → NORMAL / BORDERLINE / ABNORMAL), поэтому пороги
+    раскраски не дублируются, а совпадают со справочным блоком норм. Разница
+    с контролем (``density_diff_pct``) оценивается отдельными порогами
+    межзонального сравнения — это не референсная норма показателя.
 
     Args:
+        norms: Персональные референсные нормы активного пациента.
         density: Плотность волос/см².
         vellus_pct: Процент пушковых волос.
         tv_ratio: Соотношение Terminal/Vellus.
@@ -103,20 +98,16 @@ def _assess_status(
     bad_markers = 0
     warn_markers = 0
 
-    if density < _DENSITY_BORDERLINE_MIN:
-        bad_markers += 1
-    elif density < _DENSITY_NORM_MIN:
-        warn_markers += 1
-
-    if vellus_pct > _VELLUS_PCT_BORDERLINE_MAX:
-        bad_markers += 1
-    elif vellus_pct > _VELLUS_PCT_NORM_MAX:
-        warn_markers += 1
-
-    if tv_ratio < _TV_RATIO_BORDERLINE_MIN:
-        bad_markers += 1
-    elif tv_ratio < _TV_RATIO_NORM_MIN:
-        warn_markers += 1
+    for norm, value in (
+        (norms.density, density),
+        (norms.vellus_pct, vellus_pct),
+        (norms.tv_ratio, tv_ratio),
+    ):
+        status = norm.status(value)
+        if status is NormStatus.ABNORMAL:
+            bad_markers += 1
+        elif status is NormStatus.BORDERLINE:
+            warn_markers += 1
 
     if density_diff_pct is not None:
         if density_diff_pct < _DENSITY_DIFF_BAD:
@@ -124,10 +115,11 @@ def _assess_status(
         elif density_diff_pct < _DENSITY_DIFF_BORDERLINE:
             warn_markers += 1
 
-    if bad_markers >= 2:
+    # Хотя бы один показатель за пределами нормы (ABNORMAL) → красный:
+    # для скринингового инструмента спрятать реальное отклонение под жёлтым
+    # опаснее, чем показать красным. Пограничные (BORDERLINE) → жёлтый.
+    if bad_markers >= 1:
         return "bad"
-    if bad_markers >= 1 or warn_markers >= 2:
-        return "warning"
     if warn_markers >= 1:
         return "warning"
     return "good"
@@ -313,51 +305,50 @@ class MultizoneTab(ttk.Frame):
         """Создание справочного блока норм (компактный, всегда видим).
 
         Блок располагается между карточками зон и графиками. Показывает
-        референсные диапазоны (форматируются из тех же констант, что и
-        раскраска индикаторов) и расшифровку цветов. Только числа и цвета —
-        без диагнозов, названий болезней и рекомендаций.
+        ПЕРСОНАЛЬНЫЕ референсные диапазоны активного пациента (единый
+        источник — ``patient_norms`` / ``core.norms``; те же ``NormRange``,
+        что и раскраска индикаторов) с подписью базы подбора «Норма для: …»
+        и расшифровку цветов. Только числа и цвета — без диагнозов, названий
+        болезней и рекомендаций.
         """
         norms_frame = ttk.LabelFrame(self, text="Нормы (справочно)", padding=6)
         norms_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 2))
         norms_frame.grid_columnconfigure(0, weight=1)
 
-        # Строка норм формируется из констант раскраски (_assess_status),
-        # чтобы отображаемые значения всегда совпадали с логикой индикаторов.
-        # Средняя толщина — единственное значение из METHODOLOGY §2.2.
-        norms_text = (
-            f"Плотность: ≥{_DENSITY_NORM_MIN:.0f}/см² норма, "
-            f"{_DENSITY_BORDERLINE_MIN:.0f}–{_DENSITY_NORM_MIN:.0f} погранично"
-            f"     ·     "
-            f"Vellus: ≤{_VELLUS_PCT_NORM_MAX:.0f}% норма, "
-            f"{_VELLUS_PCT_NORM_MAX:.0f}–{_VELLUS_PCT_BORDERLINE_MAX:.0f}% погранично"
-            f"     ·     "
-            f"T/V: ≥{_TV_RATIO_NORM_MIN:.0f} норма, "
-            f"{_TV_RATIO_BORDERLINE_MIN:.0f}–{_TV_RATIO_NORM_MIN:.0f} погранично"
-            f"     ·     "
-            f"Средняя толщина: "
-            f"{_THICKNESS_MEAN_NORM_MIN_UM:.0f}–{_THICKNESS_MEAN_NORM_MAX_UM:.0f} мкм"
-        )
+        # База подбора норм активного пациента («Норма для: жен., 42 г., …»
+        # или «Норма для: общая норма»). Обновляется при смене пациента
+        # (on_tab_selected) и при показе результатов (_update_norms_panel).
+        self._norms_basis_var = tk.StringVar()
+        ttk.Label(
+            norms_frame, textvariable=self._norms_basis_var, font=("", 9, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 2))
+
+        # Строка персональных диапазонов нормы. Заполняется _update_norms_panel
+        # из тех же NormRange, что и раскраска индикаторов, поэтому значения
+        # всегда совпадают с логикой статусов.
         self._norms_label = ttk.Label(
-            norms_frame, text=norms_text, font=("", 9), justify="left",
+            norms_frame, text="", font=("", 9), justify="left",
         )
-        self._norms_label.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self._norms_label.grid(row=1, column=0, sticky="w", pady=(0, 4))
 
         # Легенда цветовых индикаторов с реальными маркерами _STATUS_COLORS.
         legend = self._create_color_legend(norms_frame)
-        legend.grid(row=1, column=0, sticky="w", pady=(0, 4))
+        legend.grid(row=2, column=0, sticky="w", pady=(0, 4))
 
         # Обязательная приписка мелким шрифтом.
         ttk.Label(
             norms_frame,
-            text="Значения справочные (METHODOLOGY §2.2), "
-            "не являются диагнозом",
+            text="Значения справочные, не являются диагнозом",
             font=("", 7),
             foreground="#757575",
-        ).grid(row=2, column=0, sticky="w")
+        ).grid(row=3, column=0, sticky="w")
 
         # Адаптивный перенос длинной строки норм по ширине блока — чтобы
         # справочный блок не растягивал вкладку по горизонтали.
         norms_frame.bind("<Configure>", self._on_norms_configure)
+
+        # Первичное заполнение персональными нормами (без пациента — общая).
+        self._update_norms_panel()
 
     def _create_color_legend(self, parent: tk.Widget) -> ttk.Frame:
         """Собрать легенду цветовых индикаторов с реальными маркерами.
@@ -407,6 +398,73 @@ class MultizoneTab(ttk.Frame):
             event: Событие изменения размера LabelFrame норм.
         """
         self._norms_label.configure(wraplength=max(event.width - 24, 120))
+
+    def _current_norms(self) -> PatientNorms:
+        """Персональные референсные нормы активного пациента (единый источник).
+
+        Делегирует ``patient_norms`` (мостик к ``core.norms``). Без выбранного
+        пациента возвращается общая норма (basis = «общая норма»), поэтому блок
+        и раскраска работают и когда пациент не выбран.
+
+        Returns:
+            ``PatientNorms`` активного пациента или общая норма.
+        """
+        return patient_norms(self._app.active_patient)
+
+    def _update_norms_panel(self, norms: PatientNorms | None = None) -> None:
+        """Обновить справочный блок норм под активного пациента.
+
+        Ставит подпись «Норма для: {basis}» и строку персональных диапазонов
+        (из тех же ``NormRange``, что и раскраска). Вызывается при показе
+        результатов и при переключении на вкладку (пациент мог смениться
+        на другой вкладке).
+
+        Args:
+            norms: Готовые нормы, если уже вычислены вызывающей стороной;
+                None — вычислить через ``_current_norms``.
+        """
+        if norms is None:
+            norms = self._current_norms()
+        self._norms_basis_var.set(f"Норма для: {norms.basis}")
+        self._norms_label.configure(text=self._format_norms_text(norms))
+
+    @staticmethod
+    def _format_norms_text(norms: PatientNorms) -> str:
+        """Собрать строку персональных диапазонов нормы для справочного блока.
+
+        Диапазоны берутся из ``NormRange`` активного пациента — того же
+        источника, что и раскраска индикаторов, поэтому текст и цвета всегда
+        согласованы между собой.
+
+        Args:
+            norms: Персональные референсные нормы активного пациента.
+
+        Returns:
+            Однострочное описание диапазонов: плотность, vellus, T/V, толщина.
+        """
+        density = norms.density
+        vellus = norms.vellus_pct
+        tv_ratio = norms.tv_ratio
+        thickness = norms.thickness_um
+
+        # borderline_high у vellus всегда задан; fallback на high — только
+        # чтобы удовлетворить строгую типизацию (float | None) без падения.
+        vellus_border = (
+            vellus.borderline_high if vellus.borderline_high is not None else vellus.high
+        )
+
+        return (
+            f"Плотность: ≥{density.low:.0f}/см² норма, "
+            f"{density.borderline_low:.0f}–{density.low:.0f} погранично"
+            f"     ·     "
+            f"Vellus: ≤{vellus.high:.0f}% норма, "
+            f"{vellus.high:.0f}–{vellus_border:.0f}% погранично"
+            f"     ·     "
+            f"T/V: ≥{tv_ratio.low:.0f} норма, "
+            f"{tv_ratio.borderline_low:.0f}–{tv_ratio.low:.0f} погранично"
+            f"     ·     "
+            f"Средняя толщина: {thickness.low:.0f}–{thickness.high:.0f} мкм"
+        )
 
     def _create_bottom_panel(self) -> None:
         """Создание нижней панели (графики + детали зоны)."""
@@ -471,7 +529,9 @@ class MultizoneTab(ttk.Frame):
     def load_results(self, zone_results: dict[str, AnalysisResult]) -> None:
         """Загрузить результаты мультизонального анализа.
 
-        Обновляет карточки зон, графики и сбрасывает детали.
+        Обновляет справочный блок норм, карточки зон, графики и сбрасывает
+        детали. Раскраска карточек и справочные диапазоны берутся из
+        персональных норм активного пациента (единый источник — core.norms).
         Показывает только метрики без диагнозов и рекомендаций.
 
         Args:
@@ -479,17 +539,66 @@ class MultizoneTab(ttk.Frame):
         """
         self._zone_results = zone_results
 
-        # Рассчитать сравнение с контролем
-        density_diffs = self._calculate_density_diffs(zone_results)
+        # Единый источник норм на весь вызов: справочный блок, раскраска
+        # карточек и линии норм на графике используют один PatientNorms.
+        norms = self._current_norms()
+        self._update_norms_panel(norms)
 
-        # Обновить карточки зон
+        # Обновить карточки зон (раскраска по персональным нормам)
+        self._refresh_zone_cards(norms)
+
+        # Обновить график
+        self._draw_comparison_chart(zone_results, norms)
+
+        # Очистить детали
+        self._set_text_widget(
+            self._detail_text,
+            "Нажмите на карточку зоны для просмотра деталей",
+        )
+
+        # Активировать экспорт (placeholder)
+        self._export_btn.config(state="disabled")
+
+        logger.info(
+            "Результаты мультизонального анализа загружены: %d зон",
+            len(zone_results),
+        )
+
+    def on_tab_selected(self) -> None:
+        """Обновить вкладку при переключении на неё.
+
+        Активный пациент мог смениться на другой вкладке — пересчитываем
+        справочный блок норм и (если результаты уже загружены) раскраску
+        карточек и линии норм на графике под текущего пациента.
+        """
+        norms = self._current_norms()
+        self._update_norms_panel(norms)
+        if self._zone_results:
+            self._refresh_zone_cards(norms)
+            self._draw_comparison_chart(self._zone_results, norms)
+
+    # ──────────────────────────── Внутренняя логика ───────────────────────────
+
+    def _refresh_zone_cards(self, norms: PatientNorms) -> None:
+        """Обновить карточки зон и их раскраску под текущие нормы.
+
+        Раскраска статусов берётся из ``NormRange.status`` персональных норм,
+        поэтому при смене пациента цвета обновляются вместе со справочным
+        блоком. Контрольная зона O всегда нейтральна.
+
+        Args:
+            norms: Персональные референсные нормы активного пациента.
+        """
+        density_diffs = self._calculate_density_diffs(self._zone_results)
+
         for zone_code in _ZONE_ORDER:
             card = self._zone_cards[zone_code]
-            if zone_code in zone_results:
-                r = zone_results[zone_code]
+            if zone_code in self._zone_results:
+                r = self._zone_results[zone_code]
                 diff = density_diffs.get(zone_code)
 
                 status = _assess_status(
+                    norms,
                     density=r.density_per_cm2,
                     vellus_pct=r.ratios.vellus_pct,
                     tv_ratio=r.ratios.tv_ratio,
@@ -509,25 +618,6 @@ class MultizoneTab(ttk.Frame):
                 )
             else:
                 card.clear_data()
-
-        # Обновить график
-        self._draw_comparison_chart(zone_results)
-
-        # Очистить детали
-        self._set_text_widget(
-            self._detail_text,
-            "Нажмите на карточку зоны для просмотра деталей",
-        )
-
-        # Активировать экспорт (placeholder)
-        self._export_btn.config(state="disabled")
-
-        logger.info(
-            "Результаты мультизонального анализа загружены: %d зон",
-            len(zone_results),
-        )
-
-    # ──────────────────────────── Внутренняя логика ───────────────────────────
 
     def _calculate_density_diffs(
         self,
@@ -623,16 +713,20 @@ class MultizoneTab(ttk.Frame):
         self._figure.tight_layout(pad=2.0)
         self._chart_canvas.draw()  # type: ignore[no-untyped-call]
 
-    def _draw_comparison_chart(self, zone_results: dict[str, AnalysisResult]) -> None:
+    def _draw_comparison_chart(
+        self, zone_results: dict[str, AnalysisResult], norms: PatientNorms,
+    ) -> None:
         """Нарисовать сравнительную диаграмму по зонам.
 
         Три subplot'а:
-        1. Плотность (волос/см²) — столбчатая
+        1. Плотность (волос/см²) — столбчатая (с линиями персональных норм)
         2. Terminal / Vellus / Intermediate (%) — stacked bar
         3. Гистограмма толщин по зонам — overlapping
 
         Args:
             zone_results: Результаты анализа по зонам.
+            norms: Персональные референсные нормы активного пациента; задают
+                линии нормы/пограничной плотности на первом subplot'е.
         """
         if not zone_results:
             self._draw_empty_chart()
@@ -662,10 +756,10 @@ class MultizoneTab(ttk.Frame):
                 ha="center", va="bottom", fontsize=8,
             )
 
-        # Горизонтальные линии норм
-        ax1.axhline(y=_DENSITY_NORM_MIN, color="blue", linestyle="--",
+        # Горизонтальные линии персональных норм плотности
+        ax1.axhline(y=norms.density.low, color="blue", linestyle="--",
                      linewidth=0.8, alpha=0.6)
-        ax1.axhline(y=_DENSITY_BORDERLINE_MIN, color="red", linestyle="--",
+        ax1.axhline(y=norms.density.borderline_low, color="red", linestyle="--",
                      linewidth=0.8, alpha=0.6)
 
         ax1.set_title("Плотность\n(волос/см\u00B2)", fontsize=9)

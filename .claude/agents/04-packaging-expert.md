@@ -40,14 +40,16 @@ model: sonnet
 
 ### requirements.txt
 ```
-opencv-python-headless>=4.8,<5.0
-numpy>=1.24,<2.0
-Pillow>=10.0,<11.0
-matplotlib>=3.7,<4.0
+opencv-python-headless>=4.10,<5.0
+numpy>=2.0,<2.3
+Pillow>=11,<13
+matplotlib>=3.9,<4.0
 fpdf2>=2.7,<3.0
 ```
 
 Примечание: `opencv-python-headless` вместо `opencv-python` — не тащит Qt.
+Источник истины по пинам — `[project]` в pyproject.toml; requirements*.txt
+синхронизируются с ним. НЕ откатывать numpy к <2 (opencv ≥4.10 требует NumPy 2).
 
 ### PyInstaller spec
 ```python

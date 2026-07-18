@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 model: opus
 ---
 
-CRITICAL: Read `.docs/METHODOLOGY.md` section 5.5 (GUI screens) before any GUI work.
+CRITICAL: Read `docs/METHODOLOGY.md` section 5.5 (GUI screens) before any GUI work.
 
 ## Role: GUI Developer
 

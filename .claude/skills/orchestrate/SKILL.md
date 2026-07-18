@@ -1,5 +1,5 @@
 ---
-name: coordinate
+name: orchestrate
 description: "Координатор задач. Анализирует задачу, разбивает на фазы, назначает агентов. Для сложных задач (> 3 файлов, новая фича, рефакторинг)."
 user-invocable: true
 allowed-tools: Agent, Read, Grep, Glob, Bash
@@ -12,7 +12,7 @@ allowed-tools: Agent, Read, Grep, Glob, Bash
 ## Алгоритм
 
 1. **Прочитай документацию**:
-   - `.docs/METHODOLOGY.md` — методология, алгоритмы, параметры
+   - `docs/METHODOLOGY.md` — методология, алгоритмы, параметры
    - `docs/ARCHITECTURE.md` — структура, слои, правила
    - `docs/todo/` — существующие планы
 

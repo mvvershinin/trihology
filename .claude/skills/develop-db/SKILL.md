@@ -12,7 +12,7 @@ allowed-tools: Agent, Read, Grep, Glob
 ## Действия
 
 1. Прочитай задачу пользователя
-2. Прочитай `.docs/METHODOLOGY.md` секцию 5.3 (схема БД)
+2. Прочитай `docs/METHODOLOGY.md` секцию 5.3 (схема БД)
 3. Запусти Agent:
    - `subagent_type`: general-purpose
    - `model`: sonnet

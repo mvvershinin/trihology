@@ -8,7 +8,7 @@ model: sonnet
 CRITICAL: ALWAYS read project documentation first.
 
 BEFORE planning any work:
-1. Read `.docs/METHODOLOGY.md` — клиническая методология, алгоритмы, параметры
+1. Read `docs/METHODOLOGY.md` — клиническая методология, алгоритмы, параметры
 2. Read `docs/ARCHITECTURE.md` — структура модулей
 3. Read `docs/todo/` — существующие планы задач
 

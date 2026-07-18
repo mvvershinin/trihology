@@ -12,7 +12,7 @@ allowed-tools: Agent, Read, Grep, Glob
 ## Действия
 
 1. Прочитай задачу пользователя
-2. Прочитай `.docs/METHODOLOGY.md` секции 3-4 (оборудование, алгоритм) и 7 (параметры)
+2. Прочитай `docs/METHODOLOGY.md` секции 3-4 (оборудование, алгоритм) и 7 (параметры)
 3. Прочитай `docs/ARCHITECTURE.md` — правила core/ слоя
 4. Запусти Agent:
    - `subagent_type`: general-purpose

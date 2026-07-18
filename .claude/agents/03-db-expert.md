@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 model: sonnet
 ---
 
-CRITICAL: Read `.docs/METHODOLOGY.md` section 5.3 (Database Schema) before any DB work.
+CRITICAL: Read `docs/METHODOLOGY.md` section 5.3 (Database Schema) before any DB work.
 
 ## Role: Database Expert
 

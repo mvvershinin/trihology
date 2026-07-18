@@ -1,0 +1,21 @@
+# Pre-commit хуки Phototrichogram.
+# Установка (не выполняется автоматически): .venv/bin/pre-commit install
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.22
+    hooks:
+      - id: ruff-check
+        name: ruff (линтер)
+
+  - repo: local
+    hooks:
+      # language: system — требует lint-imports в PATH:
+      # коммитить из активированного .venv (source .venv/bin/activate)
+      - id: lint-imports
+        name: import-linter (архитектурные слои)
+        description: "gui -> reports -> (core | data) -> utils: запрет обратных зависимостей"
+        entry: lint-imports
+        language: system
+        pass_filenames: false
+        files: \.py$

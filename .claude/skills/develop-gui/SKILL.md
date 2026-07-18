@@ -12,7 +12,7 @@ allowed-tools: Agent, Read, Grep, Glob
 ## Действия
 
 1. Прочитай задачу пользователя
-2. Прочитай `.docs/METHODOLOGY.md` секцию 5.5 (GUI экраны)
+2. Прочитай `docs/METHODOLOGY.md` секцию 5.5 (GUI экраны)
 3. Прочитай `docs/ARCHITECTURE.md` — правила gui/ слоя
 4. Запусти Agent:
    - `subagent_type`: general-purpose

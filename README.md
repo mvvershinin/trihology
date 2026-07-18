@@ -17,7 +17,7 @@
 ## Требования
 
 - Linux (Ubuntu/Debian)
-- Python 3.10+
+- Python 3.11+
 - USB-микроскоп (UVC-совместимый)
 
 ## Установка
@@ -34,8 +34,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Права USB-микроскопа (без sudo)
-sudo bash install-udev.sh
+# Права USB-микроскопа — скрипт install-udev.sh будет добавлен на фазе упаковки.
+# Временное решение (до перезагрузки):
+sudo chmod a+rw /dev/video*
 ```
 
 ## Запуск

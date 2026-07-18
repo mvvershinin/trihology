@@ -4,7 +4,7 @@
 
 **Дата**: 2026-03-15
 **Проект**: Phototrichogram (Desktop Trichoscopy App)
-**Стек**: Python 3.10+ / OpenCV / tkinter / SQLite / PyInstaller
+**Стек**: Python 3.11+ / OpenCV / tkinter / SQLite / PyInstaller
 
 ---
 
@@ -14,7 +14,7 @@
 
 Для задач > 3 файлов, новых фич, рефакторинга:
 ```bash
-/coordinate
+/orchestrate
 ```
 
 ### 2. ОБЯЗАТЕЛЬНЫЕ ПРОВЕРКИ ПОСЛЕ КОДА
@@ -31,14 +31,14 @@
 
 | Команда | Агент | Когда использовать |
 |---------|-------|-------------------|
-| `/coordinate` | coordinator | Сложные задачи, планирование |
+| `/orchestrate` | coordinator | Сложные задачи, планирование |
 | `/develop-cv` | cv-expert | Компьютерное зрение, анализ изображений |
 | `/develop-gui` | gui-expert | tkinter интерфейс |
 | `/develop-db` | db-expert | SQLite, модели данных |
 | `/package` | packaging-expert | Сборка, PyInstaller, AppImage |
 | `/validate` | architecture-validator | Проверка паттернов |
 | `/review` | code-critic | Code review, баги |
-| `/test` | test-expert | Написание тестов |
+| `/test-code` | test-expert | Написание тестов |
 
 ---
 
@@ -59,17 +59,22 @@
 
 ## Архитектура проекта
 
-### Модульная структура (MVC-подобная)
+### Модульная структура (4 слоя)
 
 ```
-GUI (View) → Core (Logic) → Data (Storage)
-     ↕              ↕              ↕
-  tkinter      OpenCV/NumPy     SQLite3
+GUI (gui/)
+ ├──→ Reports (reports/)   PDF-отчёты, fpdf2 (код с v1.1)
+ ├──→ Core (core/)         OpenCV/NumPy
+ └──→ Data (data/)         SQLite3
+Reports ──→ Core, Data (модели)
+
+core/ и data/ независимы друг от друга; utils/ — нижний слой.
+Контракт import-linter: gui → reports → (core | data) → utils (`lint-imports`).
 ```
 
 **Критические правила:**
 - GUI слой НЕ содержит бизнес-логику — только отображение и ввод
-- Core слой НЕ знает о GUI — возвращает данные, не виджеты
+- Core слой НЕ знает о GUI, Data и Reports — возвращает данные, не виджеты
 - Data слой НЕ знает о Core — только CRUD операции
 - Камера (V4L2) изолирована в отдельном модуле
 - Все параметры анализа вынесены в конфиг — не хардкод
@@ -129,6 +134,6 @@ test-expert (все тесты) → packaging-expert (сборка)
 
 | Документ | Путь | Описание |
 |----------|------|----------|
-| Методология | `.docs/METHODOLOGY.md` | Клиническая методология, алгоритмы, ТЗ |
+| Методология | `docs/METHODOLOGY.md` | Клиническая методология, алгоритмы, ТЗ |
 | Архитектура | `docs/ARCHITECTURE.md` | Структура модулей, зависимости |
 | TODO планы | `docs/todo/*.md` | Текущие задачи |

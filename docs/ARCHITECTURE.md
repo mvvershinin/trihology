@@ -7,15 +7,19 @@
 ┌─────────────────────────────────────────────┐
 │              GUI Layer (gui/)                │
 │        tkinter виджеты, отображение          │
-│        Зависит от: Core, Data                │
+│        Зависит от: Core, Data, Reports       │
+├─────────────────────────────────────────────┤
+│           Reports Layer (reports/)           │
+│      PDF-отчёты (fpdf2) — код с v1.1         │
+│      Зависит от: Core, Data (модели)         │
 ├─────────────────────────────────────────────┤
 │             Core Layer (core/)               │
 │     OpenCV пайплайн, бизнес-логика           │
-│     Зависит от: ничего (standalone)          │
+│     Зависит от: только utils/ (конфиг)       │
 ├─────────────────────────────────────────────┤
 │             Data Layer (data/)               │
 │       SQLite CRUD, модели данных             │
-│       Зависит от: ничего (standalone)        │
+│       Зависит от: только utils/              │
 ├─────────────────────────────────────────────┤
 │          Config / Utils (utils/)             │
 │     Конфигурация, логирование, хелперы       │
@@ -23,7 +27,11 @@
 └─────────────────────────────────────────────┘
 ```
 
-**Правило зависимостей**: стрелки только ВНИЗ. GUI → Core → (ничего). GUI → Data → (ничего). Обратных зависимостей НЕТ.
+**Правило зависимостей**: стрелки только ВНИЗ. GUI → Reports/Core/Data; Reports → Core, Data; Core → только utils; Data → только utils; core и data не зависят друг от друга. Обратных зависимостей НЕТ.
+
+**Enforcement**: layers-контракт import-linter в `pyproject.toml`
+(`gui → reports → (core | data) → utils`); проверка — команда `lint-imports`
+(локально и через pre-commit hook).
 
 ### 2. Dependency Injection — для тестируемости
 
@@ -115,11 +123,10 @@ logger.debug("Порог бинаризации: %d", threshold)
 
 ```
 trihology/
-├── .docs/
-│   └── METHODOLOGY.md          # Клиническая методология (исходный документ)
 ├── .claude/
 │   └── agents/                 # Инструкции для AI-агентов
 ├── docs/
+│   ├── METHODOLOGY.md          # Клиническая методология
 │   ├── ARCHITECTURE.md         # ← этот файл
 │   └── todo/                   # Планы задач
 ├── phototrichogram/            # Основной пакет
@@ -170,13 +177,14 @@ trihology/
 ├── assets/                     # Ресурсы приложения
 │   ├── icon.png
 │   └── zone_diagram.png
-├── pyproject.toml              # Метаданные проекта
-├── requirements.txt            # Зависимости
-├── requirements-dev.txt        # Dev зависимости
-├── build.spec                  # PyInstaller конфигурация
-├── install-udev.sh             # Установка USB правил
+├── pyproject.toml              # Единый центр конфигурации (метаданные, ruff, mypy, pytest, import-linter)
+├── .pre-commit-config.yaml     # Хуки: ruff + lint-imports
+├── requirements.txt            # Зависимости (пины = [project.dependencies])
+├── requirements-dev.txt        # Dev зависимости (пины = [project.optional-dependencies.dev])
+├── build.spec                  # PyInstaller конфигурация (планируется, фаза упаковки)
+├── install-udev.sh             # Установка USB правил (планируется, фаза упаковки)
 ├── CLAUDE.md                   # Инструкции для AI-агентов
-├── LICENSE                     # MIT
+├── LICENSE                     # MIT (планируется)
 ├── README.md                   # GitHub README
 └── .gitignore
 ```
@@ -185,51 +193,48 @@ trihology/
 
 ## Конфигурация проекта
 
-### pyproject.toml
+### pyproject.toml — единый источник конфигурации
+
+**Источник истины — сам файл `pyproject.toml` в корне репозитория** (здесь не
+дублируется, чтобы документ не расходился с реальностью). Состав:
+
+- `[project]` — метаданные, `requires-python = ">=3.11"`, зависимости с пинами
+- `[tool.pytest.ini_options]` — testpaths, addopts
+- `[tool.mypy]` — strict-режим, overrides `ignore_missing_imports` для cv2/fpdf (нет стабов)
+- `[tool.ruff]` — target py311, line-length 100, правила E/F/W/I/N/UP/B/A/SIM
+- `[tool.importlinter]` — контракт слоёв:
+
 ```toml
-[project]
-name = "phototrichogram"
-version = "1.0.0"
-description = "Desktop trichoscopy analysis tool"
-requires-python = ">=3.10"
-license = {text = "MIT"}
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short"
-
-[tool.mypy]
-python_version = "3.10"
-strict = true
-warn_return_any = true
-warn_unused_configs = true
-
-[tool.ruff]
-target-version = "py310"
-line-length = 100
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM"]
+[[tool.importlinter.contracts]]
+name = "Слои приложения: gui -> reports -> (core | data) -> utils"
+type = "layers"
+layers = [
+    "phototrichogram.gui",
+    "phototrichogram.reports",
+    "phototrichogram.core | phototrichogram.data",
+    "phototrichogram.utils",
+]
 ```
 
-### requirements.txt
-```
-opencv-python-headless>=4.8,<5.0
-numpy>=1.24,<2.0
-Pillow>=10.0,<11.0
-matplotlib>=3.7,<4.0
-fpdf2>=2.7,<3.0
-```
+Разделитель `|` = независимые siblings одного слоя (core⊥data). Внимание:
+`:` в import-linter 2.x, наоборот, разрешает соседям импортировать друг друга.
 
-### requirements-dev.txt
-```
-pytest>=7.0,<9.0
-pytest-cov>=4.0,<6.0
-mypy>=1.5
-ruff>=0.4
-```
+### requirements.txt / requirements-dev.txt
+
+Пины синхронизированы с pyproject.toml. Прод: `opencv-python-headless>=4.10,<5.0`,
+`numpy>=2.0,<2.3` (NumPy 2 — требование новых wheel'ов opencv), `Pillow>=11,<13`,
+`matplotlib>=3.9,<4.0` (поддержка NumPy 2 — с 3.8.4/3.9), `fpdf2>=2.7,<3.0`.
+Dev: `pytest>=8,<10`, `pytest-cov>=5,<8`, `mypy>=1.10,<3`, `ruff>=0.15,<0.16`
+(в паре с rev хука pre-commit), `import-linter>=2.0`, `pre-commit>=4,<5`.
+
+### Baseline качества (зафиксирован 2026-07-18)
+
+Снят при внедрении тулинга; исправление — отдельная задача
+(`docs/todo/2026-07-18_tooling-modernization.md`, раздел «Отложено»):
+
+- ruff: 35 ошибок (19 автофиксируемых через `--fix`)
+- mypy strict: 214 ошибок (основное: tkinter-стабы `**kwargs`, непараметризованный `np.ndarray`, matplotlib-колбэки)
+- lint-imports: контракт проходит без нарушений
 
 ---
 

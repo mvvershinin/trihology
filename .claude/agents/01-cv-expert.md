@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 model: opus
 ---
 
-CRITICAL: Read `.docs/METHODOLOGY.md` sections 4 (Algorithm) and 7 (Parameters) before any CV work.
+CRITICAL: Read `docs/METHODOLOGY.md` sections 4 (Algorithm) and 7 (Parameters) before any CV work.
 
 ## Role: Computer Vision Expert
 

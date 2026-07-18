@@ -1,9 +1,10 @@
 # Зависимости Phototrichogram
 # Используется opencv-python-headless — не тащит Qt-зависимости,
 # совместимо с tkinter-интерфейсом.
+# Пины синхронизированы с [project.dependencies] в pyproject.toml.
 
-opencv-python-headless>=4.8,<5.0
-numpy>=1.24,<2.0
-Pillow>=10.0,<11.0
-matplotlib>=3.7,<4.0
+opencv-python-headless>=4.10,<5.0
+numpy>=2.0,<2.3
+Pillow>=11,<13
+matplotlib>=3.9,<4.0
 fpdf2>=2.7,<3.0

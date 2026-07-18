@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phototrichogram"
+version = "1.0.0"
+description = "Desktop trichoscopy analysis tool"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "opencv-python-headless>=4.10,<5.0",
+    "numpy>=2.0,<2.3",
+    "Pillow>=11,<13",
+    "matplotlib>=3.9,<4.0",
+    "fpdf2>=2.7,<3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "pytest-cov>=5,<8",
+    "mypy>=1.10,<3",
+    "ruff>=0.15,<0.16",
+    "import-linter>=2.0",
+    "pre-commit>=4,<5",
+]
+
+[tool.setuptools.packages.find]
+include = ["phototrichogram*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+
+# cv2 (opencv-python-headless) и fpdf (fpdf2) не публикуют полные стабы —
+# отключаем проверку отсутствующих импортов только для них.
+[[tool.mypy.overrides]]
+module = ["cv2", "cv2.*", "fpdf", "fpdf.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM"]
+
+# --- Enforcement архитектурных слоёв ---------------------------------------
+# gui (верхний слой) -> reports -> core | data (независимые siblings,
+# core⊥data — ни один не зависит от другого) -> utils (нижний слой).
+# Разделитель "|" в import-linter 2.x = независимые модули внутри слоя
+# (в отличие от ":", который, наоборот, РАЗРЕШАЕТ им зависеть друг от друга).
+[tool.importlinter]
+root_package = "phototrichogram"
+
+[[tool.importlinter.contracts]]
+name = "Слои приложения: gui -> reports -> (core | data) -> utils"
+type = "layers"
+layers = [
+    "phototrichogram.gui",
+    "phototrichogram.reports",
+    "phototrichogram.core | phototrichogram.data",
+    "phototrichogram.utils",
+]

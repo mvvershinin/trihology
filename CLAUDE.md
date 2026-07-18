@@ -26,7 +26,7 @@
 
 ### 4. ДОКУМЕНТАЦИЯ АГЕНТОВ
 - Полное описание: `.claude/agents/README.md`
-- Slash-команды: `/coordinate`, `/develop-cv`, `/develop-gui`, `/review`, `/test`, `/validate`, `/package`
+- Slash-команды: `/orchestrate`, `/develop-cv`, `/develop-gui`, `/develop-db`, `/review`, `/test-code`, `/validate`, `/package`
 
 ---
 
@@ -35,7 +35,7 @@
 Десктопное приложение для трихоскопического анализа волос с USB-микроскопа.
 Замена коммерческого ПО стоимостью 50-150к рублей.
 
-- **Язык**: Python 3.10+
+- **Язык**: Python 3.11+
 - **GUI**: tkinter (ttk)
 - **CV**: OpenCV + NumPy
 - **БД**: SQLite3 (stdlib)
@@ -44,8 +44,9 @@
 - **Сборка**: PyInstaller → AppImage (Linux)
 - **Платформа**: Linux (Windows — в дорожной карте)
 - **Интерфейс**: полностью на русском
+- **Конфигурация**: `pyproject.toml` — единый источник (ruff, mypy, pytest, import-linter)
 
-**Методология**: `.docs/METHODOLOGY.md`
+**Методология**: `docs/METHODOLOGY.md`
 **Архитектура**: `docs/ARCHITECTURE.md`
 **Задачи**: `docs/todo/*.md`
 
@@ -53,11 +54,18 @@
 
 ## Архитектурные правила
 
-### Модульная структура (3 слоя)
+### Модульная структура (4 слоя)
 
 ```
-GUI (gui/) → Core (core/) → Data (data/)
-  tkinter     OpenCV/NumPy    SQLite3
+GUI (gui/)
+ ├──→ Reports (reports/)   PDF-отчёты, fpdf2 (код с v1.1)
+ ├──→ Core (core/)         OpenCV/NumPy
+ └──→ Data (data/)         SQLite3
+Reports ──→ Core, Data (модели)
+
+core/ и data/ независимы друг от друга; utils/ — нижний слой, доступен всем.
+Контракт import-linter: gui → reports → (core | data) → utils.
+Проверка: `lint-imports` (контракт в pyproject.toml).
 ```
 
 ### СТРОГО ЗАПРЕЩЕНО
@@ -135,8 +143,8 @@ cd /home/mvv/Projects/trihology
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Зависимости
-pip install -r requirements.txt
+# Зависимости (dev-набор включает прод-зависимости через -r)
+pip install -r requirements-dev.txt
 
 # Запуск
 python -m phototrichogram
@@ -144,15 +152,21 @@ python -m phototrichogram
 # Тесты
 pytest tests/ -v --cov=phototrichogram
 
-# Сборка
-pyinstaller build.spec
+# Линтеры и контракт слоёв
+ruff check phototrichogram/ tests/
+lint-imports
+
+# Сборка — build.spec будет создан на фазе упаковки (roadmap v1.0)
+# pyinstaller build.spec
 ```
 
 ---
 
 ## Права USB
 
-Для работы микроскопа без sudo:
+Для работы микроскопа без sudo нужны udev-правила.
+Скрипт `install-udev.sh` ещё не создан (задача фазы упаковки, roadmap v1.0).
+Временное решение до перезагрузки:
 ```bash
-sudo bash install-udev.sh
+sudo chmod a+rw /dev/video*
 ```

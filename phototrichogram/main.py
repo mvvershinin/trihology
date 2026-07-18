@@ -87,7 +87,7 @@ def main() -> None:
 
     # Загрузка конфигурации ---------------------------------------------------
     try:
-        from phototrichogram.utils.config import load_config, setup_logging  # type: ignore[import]
+        from phototrichogram.utils.config import load_config, setup_logging
 
         config = load_config()
         # Перенастроить логирование с уровнем из конфига

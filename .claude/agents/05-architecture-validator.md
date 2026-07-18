@@ -100,7 +100,7 @@ grep -rnE "f[\"'][^\"']*\{" phototrichogram/data/ | grep -iE "select|insert|upda
 grep -rnE "\.format\(|%\s*\(" phototrichogram/data/ | grep -iE "select|insert|update|delete"
 
 # Hardcoded parameters in core (границы слова — чтобы "= 30" не ловил "= 300")
-grep -rnE "= (200|0\.4|5\.9|30)([^0-9.]|$)" phototrichogram/core/ | grep -v "config\|default"
+grep -rnE "= (150|0\.6|5\.9|30)([^0-9.]|$)" phototrichogram/core/ | grep -v "config\|default"
 
 # cv2.imshow (forbidden)
 grep -rn "cv2.imshow\|cv2.waitKey" phototrichogram/

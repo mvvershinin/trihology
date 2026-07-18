@@ -27,9 +27,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from phototrichogram.data.models import Calibration, Measurement, Patient, Session
 
@@ -151,7 +151,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
 
 def _now() -> str:
     """Текущее время UTC, формат 'YYYY-MM-DD HH:MM:SS'."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ─── Database ─────────────────────────────────────────────────────────────────
@@ -195,7 +195,7 @@ class Database:
 
     # ── Контекстный менеджер ─────────────────────────────────────────────────
 
-    def __enter__(self) -> "Database":
+    def __enter__(self) -> Database:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -213,6 +213,23 @@ class Database:
         finally:
             self._conn = None
 
+    # ── Внутренние утилиты ───────────────────────────────────────────────────
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Сужение типа соединения с ``Connection | None`` до ``Connection``.
+
+        Поле ``self._conn`` объявлено опциональным только для отражения
+        состояния после close(). Внутри класса соединение используется
+        исключительно пока объект жив, поэтому здесь допустимо статическое
+        сужение типа через cast() — оно не выполняет проверку во время
+        исполнения и не меняет поведение (обращение к атрибутам закрытого
+        соединения приведёт к тому же исключению, что и раньше).
+
+        Returns:
+            Текущее соединение sqlite3, типизированное как не-Optional.
+        """
+        return cast(sqlite3.Connection, self._conn)
+
     # ── Миграции ─────────────────────────────────────────────────────────────
 
     def _run_migrations(self) -> None:
@@ -222,7 +239,8 @@ class Database:
         Применяются только миграции с версией > текущей.
         При ошибке — rollback, исключение пробрасывается наверх.
         """
-        current_version: int = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        conn = self._get_conn()
+        current_version: int = conn.execute("PRAGMA user_version").fetchone()[0]
         logger.debug("Текущая версия схемы БД: %d", current_version)
 
         pending = [(v, sql) for v, sql in _MIGRATIONS if v > current_version]
@@ -235,14 +253,14 @@ class Database:
                 raise ValueError(f"Некорректная версия миграции: {version}")
             logger.info("Применяю миграцию v%d", version)
             try:
-                with self._conn:
-                    self._conn.execute(sql)
-                self._conn.execute(f"PRAGMA user_version={int(version)}")
+                with conn:
+                    conn.execute(sql)
+                conn.execute(f"PRAGMA user_version={int(version)}")
             except sqlite3.Error as exc:
                 logger.error("Ошибка миграции v%d: %s", version, exc)
                 raise
 
-        final_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        final_version = conn.execute("PRAGMA user_version").fetchone()[0]
         logger.info("Схема БД обновлена до версии %d", final_version)
 
     # ── Вспомогательные методы ───────────────────────────────────────────────
@@ -343,9 +361,10 @@ class Database:
             raise ValueError("Имя пациента не может быть пустым")
 
         now = _now()
+        conn = self._get_conn()
         try:
-            with self._conn:
-                cursor = self._conn.execute(
+            with conn:
+                cursor = conn.execute(
                     """
                     INSERT INTO patients (name, birth_date, gender, diagnosis, notes,
                                          created_at, updated_at)
@@ -380,7 +399,7 @@ class Database:
         Returns:
             Объект Patient или None если не найден.
         """
-        row = self._conn.execute(
+        row = self._get_conn().execute(
             "SELECT * FROM patients WHERE id = ?", (patient_id,)
         ).fetchone()
 
@@ -396,7 +415,7 @@ class Database:
         Returns:
             Список объектов Patient (может быть пустым).
         """
-        rows = self._conn.execute(
+        rows = self._get_conn().execute(
             "SELECT * FROM patients ORDER BY name COLLATE NOCASE"
         ).fetchall()
 
@@ -444,9 +463,10 @@ class Database:
         set_clause = ", ".join(f'"{col}" = ?' for col, _ in items)
         values = [v for _, v in items] + [patient_id]
 
+        conn = self._get_conn()
         try:
-            with self._conn:
-                cursor = self._conn.execute(
+            with conn:
+                cursor = conn.execute(
                     f"UPDATE patients SET {set_clause} WHERE id = ?",  # noqa: S608
                     values,
                 )
@@ -476,29 +496,30 @@ class Database:
         Raises:
             sqlite3.Error: При ошибке удаления.
         """
+        conn = self._get_conn()
         try:
-            with self._conn:
+            with conn:
                 # Получаем id всех сессий пациента
                 session_ids = [
                     row[0]
-                    for row in self._conn.execute(
+                    for row in conn.execute(
                         "SELECT id FROM sessions WHERE patient_id = ?", (patient_id,)
                     ).fetchall()
                 ]
 
                 # Удаляем измерения для каждой сессии
                 for sid in session_ids:
-                    self._conn.execute(
+                    conn.execute(
                         "DELETE FROM measurements WHERE session_id = ?", (sid,)
                     )
 
                 # Удаляем сессии
-                self._conn.execute(
+                conn.execute(
                     "DELETE FROM sessions WHERE patient_id = ?", (patient_id,)
                 )
 
                 # Удаляем пациента
-                cursor = self._conn.execute(
+                cursor = conn.execute(
                     "DELETE FROM patients WHERE id = ?", (patient_id,)
                 )
         except sqlite3.Error as exc:
@@ -532,7 +553,7 @@ class Database:
             .replace("_", "\\_")
         )
         pattern = f"%{escaped}%"
-        rows = self._conn.execute(
+        rows = self._get_conn().execute(
             "SELECT * FROM patients WHERE py_lower(name) LIKE ? ESCAPE '\\' "
             "ORDER BY name COLLATE NOCASE",
             (pattern,),
@@ -580,9 +601,10 @@ class Database:
         fov_area_mm2 = fov_width_mm * fov_height_mm
         now = _now()
 
+        conn = self._get_conn()
         try:
-            with self._conn:
-                cursor = self._conn.execute(
+            with conn:
+                cursor = conn.execute(
                     """
                     INSERT INTO calibrations
                         (um_per_px, fov_width_px, fov_height_px,
@@ -635,7 +657,7 @@ class Database:
         Returns:
             Объект Calibration или None если не найден.
         """
-        row = self._conn.execute(
+        row = self._get_conn().execute(
             "SELECT * FROM calibrations WHERE id = ?", (calibration_id,)
         ).fetchone()
 
@@ -651,7 +673,7 @@ class Database:
         Returns:
             Последний объект Calibration или None если таблица пуста.
         """
-        row = self._conn.execute(
+        row = self._get_conn().execute(
             "SELECT * FROM calibrations ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
@@ -669,7 +691,7 @@ class Database:
         Returns:
             Список объектов Calibration.
         """
-        rows = self._conn.execute(
+        rows = self._get_conn().execute(
             "SELECT * FROM calibrations ORDER BY id DESC"
         ).fetchall()
 
@@ -702,9 +724,10 @@ class Database:
             sqlite3.Error: При других ошибках записи.
         """
         now = _now()
+        conn = self._get_conn()
         try:
-            with self._conn:
-                cursor = self._conn.execute(
+            with conn:
+                cursor = conn.execute(
                     """
                     INSERT INTO sessions
                         (patient_id, calibration_id, date, zone, notes, created_at)
@@ -753,7 +776,7 @@ class Database:
         Returns:
             Объект Session или None если не найдена.
         """
-        row = self._conn.execute(
+        row = self._get_conn().execute(
             "SELECT * FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
 
@@ -772,7 +795,7 @@ class Database:
         Returns:
             Список объектов Session.
         """
-        rows = self._conn.execute(
+        rows = self._get_conn().execute(
             "SELECT * FROM sessions WHERE patient_id = ? ORDER BY date DESC, id DESC",
             (patient_id,),
         ).fetchall()
@@ -795,12 +818,13 @@ class Database:
         Raises:
             sqlite3.Error: При ошибке удаления.
         """
+        conn = self._get_conn()
         try:
-            with self._conn:
-                self._conn.execute(
+            with conn:
+                conn.execute(
                     "DELETE FROM measurements WHERE session_id = ?", (session_id,)
                 )
-                cursor = self._conn.execute(
+                cursor = conn.execute(
                     "DELETE FROM sessions WHERE id = ?", (session_id,)
                 )
         except sqlite3.Error as exc:
@@ -874,9 +898,10 @@ class Database:
             sqlite3.Error: При других ошибках записи.
         """
         now = _now()
+        conn = self._get_conn()
         try:
-            with self._conn:
-                cursor = self._conn.execute(
+            with conn:
+                cursor = conn.execute(
                     """
                     INSERT INTO measurements (
                         session_id, zone,
@@ -965,7 +990,7 @@ class Database:
         Returns:
             Объект Measurement или None если не найден.
         """
-        row = self._conn.execute(
+        row = self._get_conn().execute(
             "SELECT * FROM measurements WHERE id = ?", (measurement_id,)
         ).fetchone()
 
@@ -984,7 +1009,7 @@ class Database:
         Returns:
             Список объектов Measurement, отсортированный по зоне.
         """
-        rows = self._conn.execute(
+        rows = self._get_conn().execute(
             "SELECT * FROM measurements WHERE session_id = ? ORDER BY zone, id",
             (session_id,),
         ).fetchall()
@@ -1004,7 +1029,7 @@ class Database:
         Returns:
             Список объектов Measurement.
         """
-        rows = self._conn.execute(
+        rows = self._get_conn().execute(
             """
             SELECT m.*
             FROM measurements m
@@ -1035,7 +1060,7 @@ class Database:
         Returns:
             Список объектов Measurement, отсортированный по дате возрастанию.
         """
-        rows = self._conn.execute(
+        rows = self._get_conn().execute(
             """
             SELECT m.*
             FROM measurements m
@@ -1088,10 +1113,11 @@ class Database:
             sqlite3.Error: При любой ошибке — полный rollback.
         """
         now = _now()
+        conn = self._get_conn()
         try:
-            with self._conn:
+            with conn:
                 # 1. Создаём сессию
-                cursor = self._conn.execute(
+                cursor = conn.execute(
                     """
                     INSERT INTO sessions
                         (patient_id, calibration_id, date, zone, notes, created_at)
@@ -1103,7 +1129,7 @@ class Database:
 
                 # 2. Сохраняем все измерения
                 for data in measurements_data:
-                    self._conn.execute(
+                    conn.execute(
                         """
                         INSERT INTO measurements (
                             session_id, zone,

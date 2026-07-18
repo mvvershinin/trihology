@@ -19,10 +19,11 @@ from __future__ import annotations
 import logging
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -30,6 +31,7 @@ from phototrichogram.gui.widgets import ImageCanvas, ImageFileDialog, ToolTip
 
 if TYPE_CHECKING:
     from phototrichogram.core.analyzer import AnalysisResult
+    from phototrichogram.core.camera import Camera, DeviceInfo
     from phototrichogram.gui.app import App
 
 logger = logging.getLogger(__name__)
@@ -75,8 +77,8 @@ class _ZoneCard(ttk.LabelFrame):
         self,
         parent: tk.Widget,
         zone_code: str,
-        on_preview_click: callable,
-        **kwargs: object,
+        on_preview_click: Callable[[str, np.ndarray[Any, Any]], None],
+        **kwargs: Any,
     ) -> None:
         """Инициализация карточки зоны.
 
@@ -91,7 +93,7 @@ class _ZoneCard(ttk.LabelFrame):
 
         self._zone_code = zone_code
         self._on_preview_click = on_preview_click
-        self._image: np.ndarray | None = None
+        self._image: np.ndarray[Any, Any] | None = None
         self._photo_thumb: object | None = None  # ImageTk.PhotoImage reference
 
         self._create_widgets()
@@ -102,7 +104,7 @@ class _ZoneCard(ttk.LabelFrame):
         return self._zone_code
 
     @property
-    def image(self) -> np.ndarray | None:
+    def image(self) -> np.ndarray[Any, Any] | None:
         """Загруженное изображение (BGR numpy array) или None."""
         return self._image
 
@@ -180,13 +182,13 @@ class _ZoneCard(ttk.LabelFrame):
         self._clear_btn.grid(row=1, column=0, columnspan=2, pady=(2, 0), sticky="ew")
 
         # Callback'и, которые установит CaptureTab
-        self._load_callback: callable | None = None
-        self._capture_callback: callable | None = None
+        self._load_callback: Callable[[str], None] | None = None
+        self._capture_callback: Callable[[str], None] | None = None
 
     def set_callbacks(
         self,
-        load_callback: callable,
-        capture_callback: callable,
+        load_callback: Callable[[str], None],
+        capture_callback: Callable[[str], None],
     ) -> None:
         """Установить callback'и для загрузки и захвата.
 
@@ -205,7 +207,7 @@ class _ZoneCard(ttk.LabelFrame):
         """
         self._capture_btn.config(state="normal" if available else "disabled")
 
-    def set_image(self, image: np.ndarray) -> None:
+    def set_image(self, image: np.ndarray[Any, Any]) -> None:
         """Установить изображение зоны и обновить миниатюру.
 
         Args:
@@ -237,8 +239,9 @@ class _ZoneCard(ttk.LabelFrame):
             return
 
         try:
-            from phototrichogram.utils.image_utils import numpy_to_pil, resize_to_fit_pil
             from PIL import ImageTk
+
+            from phototrichogram.utils.image_utils import numpy_to_pil, resize_to_fit_pil
 
             pil_image = numpy_to_pil(self._image)
             thumb = resize_to_fit_pil(pil_image, self._THUMB_SIZE, self._THUMB_SIZE)
@@ -281,7 +284,7 @@ class _ZoneCard(ttk.LabelFrame):
         """Очистить снимок зоны."""
         self.clear_image()
 
-    def _on_thumb_click(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_thumb_click(self, event: tk.Event) -> None:
         """Клик по миниатюре — показать в большом превью."""
         if self._image is not None:
             self._on_preview_click(self._zone_code, self._image)
@@ -297,7 +300,7 @@ class CaptureTab(ttk.Frame):
     - Снизу: статус зон + кнопка «Анализировать загруженные»
     """
 
-    def __init__(self, parent: tk.Widget, app: App, **kwargs: object) -> None:
+    def __init__(self, parent: tk.Widget, app: App, **kwargs: Any) -> None:
         """Инициализация вкладки сбора данных.
 
         Args:
@@ -307,11 +310,11 @@ class CaptureTab(ttk.Frame):
         """
         super().__init__(parent, **kwargs)
         self._app = app
-        self._camera: object | None = None  # Camera из core
+        self._camera: Camera | None = None  # Camera из core
         self._is_previewing = False
-        self._current_frame: np.ndarray | None = None
+        self._current_frame: np.ndarray[Any, Any] | None = None
         self._zone_cards: dict[str, _ZoneCard] = {}
-        self._devices: list[object] = []
+        self._devices: list[DeviceInfo] = []
 
         self._create_widgets()
         self._update_device_list()
@@ -384,7 +387,11 @@ class CaptureTab(ttk.Frame):
         # Метка когда камера не подключена
         self._no_camera_label = ttk.Label(
             preview_frame,
-            text="Камера не подключена\n\nВыберите устройство и нажмите «Подключить»\nили загрузите снимки из файлов",
+            text=(
+                "Камера не подключена\n\n"
+                "Выберите устройство и нажмите «Подключить»\n"
+                "или загрузите снимки из файлов"
+            ),
             anchor="center",
             justify="center",
             style="Header.TLabel",
@@ -629,7 +636,7 @@ class CaptureTab(ttk.Frame):
         )
         logger.info("Снимок для зоны %s сделан", zone_code)
 
-    def _on_zone_preview(self, zone_code: str, image: np.ndarray) -> None:
+    def _on_zone_preview(self, zone_code: str, image: np.ndarray[Any, Any]) -> None:
         """Показать снимок зоны в большом превью.
 
         Args:
@@ -641,7 +648,7 @@ class CaptureTab(ttk.Frame):
             f"Превью: зона {zone_code} — {_ZONE_INFO[zone_code]['name']}",
         )
 
-    def _on_space_key(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_space_key(self, event: tk.Event) -> None:
         """Обработка нажатия Space — снимок если превью активно.
 
         Не делает снимок, если фокус в текстовом поле.
@@ -675,7 +682,7 @@ class CaptureTab(ttk.Frame):
         else:
             self._analyze_btn.config(state="disabled")
 
-    def _autosave_snapshot(self, frame: np.ndarray, zone_code: str) -> None:
+    def _autosave_snapshot(self, frame: np.ndarray[Any, Any], zone_code: str) -> None:
         """Автоматическое сохранение снимка в директорию из конфига.
 
         Args:
@@ -701,10 +708,11 @@ class CaptureTab(ttk.Frame):
     def _on_analyze_all(self) -> None:
         """Запуск анализа всех загруженных зон в отдельном потоке."""
         # Собрать загруженные зоны
-        zone_images: dict[str, np.ndarray] = {}
+        zone_images: dict[str, np.ndarray[Any, Any]] = {}
         for zone_code, card in self._zone_cards.items():
-            if card.has_image:
-                zone_images[zone_code] = card.image.copy()
+            image = card.image
+            if image is not None:
+                zone_images[zone_code] = image.copy()
 
         if not zone_images:
             self._app.status_bar.set_text("Нет загруженных снимков для анализа")
@@ -735,7 +743,8 @@ class CaptureTab(ttk.Frame):
                 self.after(0, lambda: self._on_analysis_complete(results))
             except Exception as e:
                 logger.error("Ошибка мультизонального анализа: %s", e)
-                self.after(0, lambda: self._on_analysis_error(str(e)))
+                error_msg = str(e)
+                self.after(0, lambda: self._on_analysis_error(error_msg))
 
         threading.Thread(target=do_analysis, daemon=True).start()
 
@@ -793,7 +802,7 @@ class CaptureTab(ttk.Frame):
 
             # Подготовить данные измерений
             today = datetime.now().strftime("%Y-%m-%d")
-            measurements_data: list[dict] = []
+            measurements_data: list[dict[str, Any]] = []
 
             for zone_code, result in results.items():
                 meas_dict = {
@@ -816,10 +825,16 @@ class CaptureTab(ttk.Frame):
                 }
                 measurements_data.append(meas_dict)
 
+            # id гарантированы: пациент активен (из БД), калибровка только что создана
+            patient_id = patient.id
+            calibration_id = calibration.id
+            assert patient_id is not None
+            assert calibration_id is not None
+
             # Атомарное создание сессии со всеми измерениями
             db.create_session_with_measurements(
-                patient_id=patient.id,
-                calibration_id=calibration.id,
+                patient_id=patient_id,
+                calibration_id=calibration_id,
                 date=today,
                 measurements_data=measurements_data,
             )

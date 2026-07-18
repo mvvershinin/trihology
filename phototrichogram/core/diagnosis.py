@@ -183,7 +183,6 @@ def _generate_zone_findings(
     Returns:
         Список текстовых находок.
     """
-    zone_name = ZONE_NAMES.get(zone_code, zone_code)
     findings: list[str] = []
 
     # Плотность
@@ -348,7 +347,6 @@ def _compare_with_control(
     # Разница vellus (в процентных пунктах)
     vellus_diff_pp = zone_diag.vellus_pct - control_diag.vellus_pct
 
-    zone_prep = _ZONE_NAMES_PREP.get(zone_diag.zone, zone_name.lower())
     control_prep = _ZONE_NAMES_PREP.get(control_diag.zone, control_name.lower())
 
     if abs(density_diff_pct) > density_diff_significant:

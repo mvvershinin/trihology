@@ -10,12 +10,13 @@ repos:
 
   - repo: local
     hooks:
-      # language: system — требует lint-imports в PATH:
-      # коммитить из активированного .venv (source .venv/bin/activate)
+      # language: python — pre-commit сам ставит import-linter в изолированное
+      # окружение; активированный .venv для коммита не требуется
       - id: lint-imports
         name: import-linter (архитектурные слои)
         description: "gui -> reports -> (core | data) -> utils: запрет обратных зависимостей"
         entry: lint-imports
-        language: system
+        language: python
+        additional_dependencies: ["import-linter>=2.0,<3"]
         pass_filenames: false
         files: \.py$

@@ -2,7 +2,8 @@
 Сегментация волос на трихоскопическом снимке.
 
 Обновлённый пайплайн для реальных трихоскопических изображений:
-    RGB -> Grayscale -> CLAHE -> Black-hat морфология -> Adaptive threshold -> Тонкая морфология -> Контуры
+    RGB -> Grayscale -> CLAHE -> Black-hat морфология -> Adaptive threshold ->
+    Тонкая морфология -> Контуры
 
 Ключевые отличия от наивного подхода (Otsu + THRESH_BINARY_INV):
 - Black-hat transform выделяет ТОЛЬКО тёмные структуры (волосы) меньше ядра,
@@ -17,16 +18,18 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
 from phototrichogram.utils.config import AnalysisConfig
 
 logger = logging.getLogger(__name__)
 
 
-def preprocess(image: np.ndarray, config: AnalysisConfig) -> np.ndarray:
+def preprocess(image: NDArray[np.uint8], config: AnalysisConfig) -> NDArray[np.uint8]:
     """Предобработка изображения перед сегментацией.
 
     Пайплайн:
@@ -42,10 +45,7 @@ def preprocess(image: np.ndarray, config: AnalysisConfig) -> np.ndarray:
         Обработанное одноканальное изображение (uint8).
     """
     # Шаг 1 — Grayscale
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
 
     # Шаг 2 — CLAHE
     tile = config.clahe_tile_size
@@ -61,10 +61,11 @@ def preprocess(image: np.ndarray, config: AnalysisConfig) -> np.ndarray:
         kernel += 1
     denoised = cv2.medianBlur(enhanced, kernel)
 
-    return denoised
+    # cv2 возвращает MatLike — после grayscale/CLAHE/медианы это одноканальный uint8.
+    return cast(NDArray[np.uint8], denoised)
 
 
-def segment_hair(image: np.ndarray, config: AnalysisConfig) -> np.ndarray:
+def segment_hair(image: NDArray[np.uint8], config: AnalysisConfig) -> NDArray[np.uint8]:
     """Сегментация волос — полный пайплайн до бинарной маски.
 
     Алгоритм для реальных трихоскопических снимков:
@@ -147,7 +148,12 @@ def segment_hair(image: np.ndarray, config: AnalysisConfig) -> np.ndarray:
             white_pct, config.max_white_pct,
         )
         # Поднимаем порог — берём более высокий перцентиль
-        p_thresh = np.percentile(blackhat[blackhat > 0], 75) if np.any(blackhat > 0) else 10
+        # blackhat это MatLike (dtype integer|floating) — сужаем до uint8 для np.percentile
+        p_thresh = (
+            np.percentile(cast(NDArray[np.uint8], blackhat[blackhat > 0]), 75)
+            if np.any(blackhat > 0)
+            else 10
+        )
         _, binary = cv2.threshold(
             blackhat, int(p_thresh), 255, cv2.THRESH_BINARY
         )
@@ -182,12 +188,13 @@ def segment_hair(image: np.ndarray, config: AnalysisConfig) -> np.ndarray:
         w, h, white_final,
     )
 
-    return binary
+    # cv2 морфология/порог возвращают MatLike — итоговая маска это uint8 (0/255).
+    return cast(NDArray[np.uint8], binary)
 
 
 def find_hair_contours(
-    mask: np.ndarray, config: AnalysisConfig
-) -> list[np.ndarray]:
+    mask: NDArray[np.uint8], config: AnalysisConfig
+) -> list[NDArray[np.int32]]:
     """Поиск контуров волос на бинарной маске с фильтрацией.
 
     Фильтры (METHODOLOGY.md §4.4):
@@ -206,7 +213,7 @@ def find_hair_contours(
     """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    hair_contours: list[np.ndarray] = []
+    hair_contours: list[NDArray[np.int32]] = []
     rejected_area = 0
     rejected_shape = 0
     rejected_aspect = 0
@@ -239,7 +246,8 @@ def find_hair_contours(
                     rejected_aspect += 1
                     continue
 
-        hair_contours.append(cnt)
+        # cv2.findContours отдаёт Sequence[MatLike] — контур это массив точек int32.
+        hair_contours.append(cast(NDArray[np.int32], cnt))
 
     logger.debug(
         "Контуры: всего=%d, отклонено площадь=%d, форма=%d, аспект=%d, принято=%d",

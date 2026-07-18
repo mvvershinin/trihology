@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import cast
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,7 @@ class CalibrationResult:
 
 
 def _detect_divisions_in_row(
-    row: np.ndarray,
+    row: NDArray[np.uint8],
     max_stripe_width: int = 12,
 ) -> list[float]:
     """Обнаружение центров тёмных полос (делений) в одной строке пикселей.
@@ -123,7 +125,7 @@ def _median_filter_distances(
 
 
 def calibrate_from_ruler(
-    image: np.ndarray,
+    image: NDArray[np.uint8],
     division_um: float = 100.0,
     row_range: tuple[int, int] | None = None,
     threshold: int = 128,
@@ -150,13 +152,16 @@ def calibrate_from_ruler(
         CalibrationResult с рассчитанным масштабом.
 
     Raises:
-        CalibrationError: Если делений не обнаружено или слишком мало для расчёта.
+        CalibrationError: Если цена деления не положительна, делений
+            не обнаружено или слишком мало для расчёта.
     """
+    if division_um <= 0:
+        raise CalibrationError(
+            f"Цена деления должна быть положительной, получено: {division_um}"
+        )
+
     # Grayscale
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
 
     h, w = gray.shape
 
@@ -177,7 +182,8 @@ def calibrate_from_ruler(
     all_distances: list[float] = []
 
     for y in range(y_start, y_end):
-        row = binary[y, :]
+        # cv2.threshold возвращает MatLike — строка бинарной маски это uint8.
+        row = cast(NDArray[np.uint8], binary[y, :])
         centers = _detect_divisions_in_row(row, max_stripe_width)
 
         if len(centers) < 2:

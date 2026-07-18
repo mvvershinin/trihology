@@ -34,9 +34,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Права USB-микроскопа — скрипт install-udev.sh будет добавлен на фазе упаковки.
-# Временное решение (до перезагрузки):
-sudo chmod a+rw /dev/video*
+# Права USB-микроскопа (без sudo при последующих запусках)
+sudo bash install-udev.sh
 ```
 
 ## Запуск
@@ -49,6 +48,25 @@ python -m phototrichogram
 ## Использование
 
 См. [docs/USER_GUIDE.md](docs/USER_GUIDE.md)
+
+## Сборка
+
+Standalone-дистрибутив (PyInstaller, режим onedir):
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-dev.txt   # добавляет pyinstaller
+pyinstaller build.spec --noconfirm
+```
+
+Результат — каталог `dist/phototrichogram/` с исполняемым файлом
+`phototrichogram` и всеми зависимостями рядом (запускать можно только из
+этого каталога, файлы `_internal/` переносить/удалять по отдельности нельзя).
+
+AppImage (нужен `appimagetool` в PATH — не устанавливается автоматически):
+```bash
+bash build-appimage.sh
+```
 
 ## Стек
 

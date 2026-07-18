@@ -79,7 +79,7 @@ core/ и data/ независимы друг от друга; utils/ — ниж�
 | cv2.imshow() | Показ через tkinter |
 | print() вместо logging | Не отключается в релизе |
 | f-string в SQL | SQL injection |
-| Английский текст в UI | Интерфейс на русском |
+| Английский текст в UI | Интерфейс на русском. Исключение: клинические термины Terminal/Vellus/T/V — общепринятая трихологическая номенклатура |
 
 ### ОБЯЗАТЕЛЬНО
 
@@ -113,9 +113,9 @@ class AnalysisConfig:
     morph_close_iterations: int = 1
     morph_open_iterations: int = 1
 
-    # Пороги детекции
-    min_hair_area: int = 200
-    max_circularity: float = 0.4
+    # Пороги детекции (эмпирически подстроены, см. METHODOLOGY.md §7.1)
+    min_hair_area: int = 150
+    max_circularity: float = 0.6
 
     # Классификация
     vellus_threshold_um: float = 30.0
@@ -156,17 +156,24 @@ pytest tests/ -v --cov=phototrichogram
 ruff check phototrichogram/ tests/
 lint-imports
 
-# Сборка — build.spec будет создан на фазе упаковки (roadmap v1.0)
-# pyinstaller build.spec
+# Сборка (standalone-дистрибутив, onedir; см. build.spec)
+pyinstaller build.spec
 ```
 
 ---
 
 ## Права USB
 
-Для работы микроскопа без sudo нужны udev-правила.
-Скрипт `install-udev.sh` ещё не создан (задача фазы упаковки, roadmap v1.0).
-Временное решение до перезагрузки:
+Для работы микроскопа без sudo нужны udev-правила:
+```bash
+sudo bash install-udev.sh
+```
+Скрипт ставит правило `/etc/udev/rules.d/99-phototrichogram.rules`
+(`SUBSYSTEM=="video4linux", GROUP="video", MODE="0660"`) и подсказывает
+добавить пользователя в группу `video` (`sudo usermod -aG video $USER` +
+перевход в сессию), если он ещё не состоит в ней.
+
+Временное решение — без установки правила, до перезагрузки:
 ```bash
 sudo chmod a+rw /dev/video*
 ```

@@ -10,11 +10,13 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
 from phototrichogram.core.classification import HairType, classify_all
 from phototrichogram.core.measurement import HairMeasurement, measure_all
@@ -27,6 +29,13 @@ from phototrichogram.core.stats import (
     thickness_statistics,
 )
 from phototrichogram.utils.config import AnalysisConfig
+from phototrichogram.utils.resources import resource_path
+
+if TYPE_CHECKING:
+    from PIL import ImageFont
+
+    # PIL-шрифт: векторный TTF (FreeTypeFont) или встроенный растровый (ImageFont).
+    _PilFont = ImageFont.FreeTypeFont | ImageFont.ImageFont
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +48,12 @@ _COLOR_TEXT = (0, 255, 255)          # Жёлтый (BGR)
 _COLOR_TEXT_RGB = (255, 255, 0)      # Жёлтый (RGB для PIL)
 _CONTOUR_THICKNESS = 2
 
-# Шрифты для русского текста через PIL
+# Шрифты для русского текста через PIL: сначала шрифты из пакета
+# (assets/fonts/ — попадают в сборку PyInstaller), затем системные.
+# Собранное приложение не зависит от наличия шрифтов на хосте.
 _FONT_PATHS = [
+    str(resource_path("assets/fonts/DejaVuSans.ttf")),
+    str(resource_path("assets/fonts/DejaVuSans-Bold.ttf")),
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -48,20 +61,21 @@ _FONT_PATHS = [
     "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
 ]
 
-_pil_font_cache: dict[int, object] = {}
+_pil_font_cache: dict[int, _PilFont | None] = {}
 
 
-def _get_pil_font(size: int = 16) -> object:
+def _get_pil_font(size: int = 16) -> _PilFont | None:
     """Получить PIL шрифт с поддержкой кириллицы.
 
-    Ищет системные TTF шрифты (DejaVu, Liberation, Ubuntu, Noto).
+    Сначала пробует шрифты из пакета (assets/fonts/, есть и в сборке),
+    затем системные TTF (DejaVu, Liberation, Ubuntu, Noto).
     Кэширует результат по размеру. Если шрифт не найден, возвращает дефолтный.
 
     Args:
         size: Размер шрифта в пикселях.
 
     Returns:
-        PIL.ImageFont объект.
+        PIL.ImageFont объект или None, если PIL недоступен.
     """
     if size in _pil_font_cache:
         return _pil_font_cache[size]
@@ -76,11 +90,11 @@ def _get_pil_font(size: int = 16) -> object:
     for font_path in _FONT_PATHS:
         if Path(font_path).exists():
             try:
-                font = ImageFont.truetype(font_path, size)
+                font: _PilFont = ImageFont.truetype(font_path, size)
                 _pil_font_cache[size] = font
                 logger.debug("PIL шрифт загружен: %s (размер %d)", font_path, size)
                 return font
-            except (OSError, IOError):
+            except OSError:
                 continue
 
     # Fallback — дефолтный PIL шрифт (без кириллицы, но хотя бы латиница)
@@ -91,12 +105,12 @@ def _get_pil_font(size: int = 16) -> object:
 
 
 def _put_text_pil(
-    image: np.ndarray,
+    image: NDArray[np.uint8],
     text: str,
     position: tuple[int, int],
     color_rgb: tuple[int, int, int],
     font_size: int = 16,
-) -> np.ndarray:
+) -> NDArray[np.uint8]:
     """Нанесение текста на изображение через PIL (поддержка кириллицы).
 
     cv2.putText не поддерживает Unicode/кириллицу — показывает '??????'.
@@ -158,8 +172,8 @@ class AnalysisResult:
     density_per_cm2: float
     ratios: HairRatios
     thickness: ThicknessStats
-    mask: np.ndarray
-    annotated_image: np.ndarray | None
+    mask: NDArray[np.uint8]
+    annotated_image: NDArray[np.uint8] | None
     fov_area_mm2: float
 
 
@@ -181,11 +195,11 @@ def _get_hair_color(classification: str) -> tuple[int, int, int]:
 
 
 def _annotate_image(
-    image: np.ndarray,
+    image: NDArray[np.uint8],
     measurements: list[HairMeasurement],
     density: float,
     ratios: HairRatios,
-) -> np.ndarray:
+) -> NDArray[np.uint8]:
     """Аннотация снимка -- контуры волос и информационная панель.
 
     Цвета контуров (METHODOLOGY.md 6.1):
@@ -292,7 +306,7 @@ class Analyzer:
         """
         self.config = config
 
-    def analyze(self, image: np.ndarray) -> AnalysisResult | None:
+    def analyze(self, image: NDArray[np.uint8]) -> AnalysisResult | None:
         """Полный анализ снимка БЕЗ аннотации.
 
         Возвращает результат без annotated_image (= None).
@@ -306,7 +320,7 @@ class Analyzer:
         """
         return self._run_pipeline(image, annotate=False)
 
-    def analyze_with_annotation(self, image: np.ndarray) -> AnalysisResult | None:
+    def analyze_with_annotation(self, image: NDArray[np.uint8]) -> AnalysisResult | None:
         """Полный анализ снимка С аннотацией.
 
         Возвращает результат с annotated_image — копия снимка
@@ -321,7 +335,7 @@ class Analyzer:
         return self._run_pipeline(image, annotate=True)
 
     def _run_pipeline(
-        self, image: np.ndarray, annotate: bool
+        self, image: NDArray[np.uint8], annotate: bool
     ) -> AnalysisResult | None:
         """Внутренняя реализация пайплайна.
 
@@ -364,7 +378,7 @@ class Analyzer:
         thickness = thickness_statistics(measurements)
 
         # 6. Аннотация (опционально)
-        annotated: np.ndarray | None = None
+        annotated: NDArray[np.uint8] | None = None
         if annotate:
             annotated = _annotate_image(image, measurements, density, ratios)
 

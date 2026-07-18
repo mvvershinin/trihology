@@ -17,9 +17,10 @@ from __future__ import annotations
 import logging
 import tkinter as tk
 from tkinter import ttk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import matplotlib
+
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -132,7 +133,7 @@ class _ZoneResultCard(ttk.Frame):
         self,
         parent: tk.Widget,
         zone_code: str,
-        **kwargs: object,
+        **kwargs: Any,
     ) -> None:
         """Инициализация карточки результата.
 
@@ -247,7 +248,7 @@ class MultizoneTab(ttk.Frame):
     - Детальный просмотр статистики зоны по клику
     """
 
-    def __init__(self, parent: tk.Widget, app: App, **kwargs: object) -> None:
+    def __init__(self, parent: tk.Widget, app: App, **kwargs: Any) -> None:
         """Инициализация вкладки результатов.
 
         Args:
@@ -285,8 +286,13 @@ class MultizoneTab(ttk.Frame):
         for i, zone_code in enumerate(_ZONE_ORDER):
             card = _ZoneResultCard(zones_outer, zone_code)
             card.grid(row=0, column=i, sticky="nsew", padx=3, pady=3)
-            # Клик по карточке — показать детали
-            card.bind("<Button-1>", lambda e, zc=zone_code: self._on_zone_click(zc))
+
+            # Клик по карточке — показать детали.
+            # zc=zone_code фиксирует значение зоны на текущей итерации цикла.
+            def _on_card_click(event: tk.Event[Any], zc: str = zone_code) -> None:
+                self._on_zone_click(zc)
+
+            card.bind("<Button-1>", _on_card_click)
             self._zone_cards[zone_code] = card
 
     def _create_bottom_panel(self) -> None:
@@ -304,8 +310,11 @@ class MultizoneTab(ttk.Frame):
         chart_frame.grid_columnconfigure(0, weight=1)
 
         self._figure = Figure(figsize=(7, 4), dpi=80)
-        self._chart_canvas = FigureCanvasTkAgg(self._figure, master=chart_frame)
-        self._chart_widget = self._chart_canvas.get_tk_widget()
+        # matplotlib backend (backend_tkagg) не типизирован → no-untyped-call
+        self._chart_canvas = FigureCanvasTkAgg(  # type: ignore[no-untyped-call]
+            self._figure, master=chart_frame,
+        )
+        self._chart_widget = self._chart_canvas.get_tk_widget()  # type: ignore[no-untyped-call]
         self._chart_widget.grid(row=0, column=0, sticky="nsew")
 
         self._draw_empty_chart()
@@ -499,7 +508,7 @@ class MultizoneTab(ttk.Frame):
         )
         ax.set_axis_off()
         self._figure.tight_layout(pad=2.0)
-        self._chart_canvas.draw()
+        self._chart_canvas.draw()  # type: ignore[no-untyped-call]
 
     def _draw_comparison_chart(self, zone_results: dict[str, AnalysisResult]) -> None:
         """Нарисовать сравнительную диаграмму по зонам.
@@ -532,7 +541,7 @@ class MultizoneTab(ttk.Frame):
         bars = ax1.bar(zones, densities, color=colors, edgecolor="white", linewidth=0.5)
 
         # Подписи значений на столбцах
-        for bar, val in zip(bars, densities):
+        for bar, val in zip(bars, densities, strict=True):
             ax1.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + 2,
@@ -564,7 +573,7 @@ class MultizoneTab(ttk.Frame):
             x_pos, intermediate_pcts, bar_width,
             bottom=terminal_pcts, label="Intermediate", color="#FFD93D",
         )
-        bottoms = [t + i for t, i in zip(terminal_pcts, intermediate_pcts)]
+        bottoms = [t + i for t, i in zip(terminal_pcts, intermediate_pcts, strict=True)]
         ax2.bar(
             x_pos, vellus_pcts, bar_width,
             bottom=bottoms, label="Vellus", color="#FF6B6B",
@@ -605,4 +614,4 @@ class MultizoneTab(ttk.Frame):
         ax3.tick_params(axis="both", labelsize=8)
 
         self._figure.tight_layout(pad=1.5)
-        self._chart_canvas.draw()
+        self._chart_canvas.draw()  # type: ignore[no-untyped-call]

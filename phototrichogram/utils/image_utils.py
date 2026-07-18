@@ -15,10 +15,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image, ImageTk
 
 if TYPE_CHECKING:
-    import tkinter as tk
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset({
 })
 
 
-def cv2_to_photoimage(cv_image: np.ndarray) -> ImageTk.PhotoImage:
+def cv2_to_photoimage(cv_image: NDArray[np.uint8]) -> ImageTk.PhotoImage:
     """Конвертация изображения из формата OpenCV (BGR numpy) в tkinter PhotoImage.
 
     Args:
@@ -44,7 +45,7 @@ def cv2_to_photoimage(cv_image: np.ndarray) -> ImageTk.PhotoImage:
     return ImageTk.PhotoImage(image=pil_image)
 
 
-def numpy_to_pil(image: np.ndarray) -> Image.Image:
+def numpy_to_pil(image: NDArray[np.uint8]) -> Image.Image:
     """Конвертация numpy array (BGR или Grayscale) в PIL Image (RGB).
 
     Args:
@@ -80,7 +81,7 @@ def numpy_to_pil(image: np.ndarray) -> Image.Image:
     raise ValueError(msg)
 
 
-def pil_to_numpy(image: Image.Image) -> np.ndarray:
+def pil_to_numpy(image: Image.Image) -> NDArray[np.uint8]:
     """Конвертация PIL Image в numpy array (BGR формат OpenCV).
 
     Args:
@@ -97,15 +98,15 @@ def pil_to_numpy(image: Image.Image) -> np.ndarray:
 
     rgb_array = np.array(image)
     # RGB → BGR (через numpy slice, без cv2)
-    bgr_array: np.ndarray = rgb_array[:, :, ::-1].copy()
+    bgr_array: NDArray[np.uint8] = rgb_array[:, :, ::-1].copy()
     return bgr_array
 
 
 def resize_to_fit(
-    image: np.ndarray,
+    image: NDArray[np.uint8],
     max_width: int,
     max_height: int,
-) -> np.ndarray:
+) -> NDArray[np.uint8]:
     """Ресайз изображения с сохранением пропорций (вписать в рамку).
 
     Уменьшает изображение так, чтобы оно целиком вместилось
@@ -137,7 +138,7 @@ def resize_to_fit(
 
     # Ресайз через PIL (LANCZOS — высокое качество)
     pil_image = numpy_to_pil(image)
-    pil_resized = pil_image.resize((new_w, new_h), Image.LANCZOS)
+    pil_resized = pil_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
     return pil_to_numpy(pil_resized)
 
 
@@ -165,10 +166,10 @@ def resize_to_fit_pil(
     new_w = int(w * scale)
     new_h = int(h * scale)
 
-    return image.resize((new_w, new_h), Image.LANCZOS)
+    return image.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 
-def load_image(path: Path | str) -> np.ndarray | None:
+def load_image(path: Path | str) -> NDArray[np.uint8] | None:
     """Загрузка изображения из файла в формат numpy BGR.
 
     Использует PIL для загрузки (без зависимости от cv2).
@@ -198,7 +199,7 @@ def load_image(path: Path | str) -> np.ndarray | None:
         return None
 
 
-def save_image(image: np.ndarray, path: Path | str) -> bool:
+def save_image(image: NDArray[np.uint8], path: Path | str) -> bool:
     """Сохранение numpy изображения (BGR) в файл.
 
     Создаёт родительскую директорию если не существует.

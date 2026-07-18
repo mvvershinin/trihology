@@ -79,13 +79,23 @@
 
 ⬜ Миграция на uv (замена pip+venv) — стандарт 2026, но трогает workflow разработчика
 ⬜ src-layout (`src/phototrichogram/`) — для приложения под PyInstaller не критично
-⬜ Исправление baseline: ruff 35 ошибок (19 автофиксируемых), mypy strict 214
+⬜ v1.1 PDF-отчёты + v1.2 бэкап БД — отложено решением пользователя 2026-07-18; задел готов: шрифты DejaVu (кириллица) уже в `assets/fonts/` — PDF делать полностью из пакета, без системных зависимостей
+⬜ v1.3 дерматоскопические признаки, v2.0 (Windows, watershed, CI/CD) — по дорожной карте
+
+### Follow-up (нашёл финальный гейт 2026-07-18)
+
+⬜ **Дубль клинической логики статусов в GUI**: `gui/multizone_tab.py:64-123` (`_assess_status` + пороги) — третья параллельная реализация рядом с `core/diagnosis.get_zone_status` и `core/stats._assess_zone`. Вынести единый классификатор в core/, GUI должен его вызывать (правило «GUI без бизнес-логики»)
+⬜ **METHODOLOGY §4 устарел**: описывает Intermodes + fill_holes вместо фактического black-hat пайплайна; supersession-примечание добавлено 2026-07-18, нужна полная актуализация раздела под код
+✅ Baseline ruff: 0 ошибок (2026-07-18) — попутно исправлены 3 реальных F821-бага: `lambda: ...str(e)` в except-блоках analysis_tab/calibration_tab/capture_tab падали бы с NameError при показе ошибки (переменная `e` удаляется при выходе из except)
+✅ Baseline mypy strict 214 → 0 по всему проекту (2026-07-18): data/ 47→0 (cast-helper), core/+utils/ 35→0 (6 cast на границах cv2), gui/+main 135→0 (19 targeted ignore на дырах стабов matplotlib/tkinter, удалено 18 устаревших ignore)
 
 ### Найдено при выполнении (новые задачи)
 
-⬜ **Баг терминологии зон** (предсуществующий, 4 падающих теста): `core/diagnosis.py:27-32` использует «Лобная»/«Теменная», а `docs/METHODOLOGY.md` §2.3 и `tests/test_diagnosis.py` — «Фронтальная»/«Париетальная». Дубли также в `gui/capture_tab.py:42-43`, `gui/multizone_tab.py:37-38`. Нужно product-решение: канон — методичка (тогда правится код в 3 файлах) или UI-термины (тогда методичка + тесты)
-⬜ **Покрытие тестами 12%**: существует только `tests/test_diagnosis.py` (44 теста); из чартера test-expert не написаны test_segmentation, test_measurement, test_classification, test_calibration, test_stats, test_database, test_analyzer, conftest, fixtures
+✅ **Баг терминологии зон** — решение пользователя: канон «Лобная/Теменная» (как в коде). Методичка §2.3 и тесты выровнены, 44/44 зелёные (2026-07-18)
+✅ **Покрытие тестами 12% → 33%** (2026-07-18): добавлено 9 файлов / 214 тестов (segmentation, measurement, classification, calibration, stats, database, analyzer, camera через monkeypatch, conftest с синтетикой). Всего 258 зелёных; core/ и data/ покрыты на 88–100%. GUI не тестируется по стратегии ARCHITECTURE.md (ручная проверка)
 
-⬜ **Дрейф дефолтов конфига от методички** (нашёл architecture-validator): `utils/config.py:81-82` — `min_hair_area=150`, `max_circularity=0.6`, а `docs/METHODOLOGY.md` §7.1 и пример в CLAUDE.md фиксируют `200`/`0.4`. Похоже на эмпирическую подстройку; нужно product-решение — обновить методичку или вернуть значения
+✅ **Баг валидации калибровки** (нашёл test-expert, исправлено): `calibrate_from_ruler` при `division_um<=0` тихо возвращал нулевой/отрицательный масштаб — теперь CalibrationError + 2 теста
 
-⬜ **Англицизмы в UI** (Terminal/Vellus/«T/V» в history_tab, analysis_tab, multizone_tab): соответствуют терминологии METHODOLOGY.md, но формально нарушают правило CLAUDE.md «Английский текст в UI запрещён». Задокументировать как согласованное исключение либо перевести
+✅ **Дрейф дефолтов конфига** — решение: канон — код (эмпирическая подстройка 150/0.6). METHODOLOGY §7.1 и пример CLAUDE.md обновлены (2026-07-18)
+
+✅ **Англицизмы в UI** — задокументированы как согласованное исключение в CLAUDE.md (клинические термины Terminal/Vellus/T/V) (2026-07-18)

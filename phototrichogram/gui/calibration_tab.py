@@ -12,9 +12,8 @@ from __future__ import annotations
 import logging
 import threading
 import tkinter as tk
-from pathlib import Path
 from tkinter import ttk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -40,7 +39,7 @@ class CalibrationTab(ttk.Frame):
         - Кнопка сохранения в конфиг
     """
 
-    def __init__(self, parent: tk.Widget, app: App, **kwargs: object) -> None:
+    def __init__(self, parent: tk.Widget, app: App, **kwargs: Any) -> None:
         """Инициализация вкладки калибровки.
 
         Args:
@@ -50,7 +49,7 @@ class CalibrationTab(ttk.Frame):
         """
         super().__init__(parent, **kwargs)
         self._app = app
-        self._ruler_image: np.ndarray | None = None
+        self._ruler_image: np.ndarray[Any, Any] | None = None
         self._calibration_result: CalibrationResult | None = None
 
         self._create_widgets()
@@ -274,7 +273,8 @@ class CalibrationTab(ttk.Frame):
                 self.after(0, lambda: self._on_calibration_complete(result))
             except Exception as e:
                 logger.error("Ошибка калибровки: %s", e)
-                self.after(0, lambda: self._on_calibration_error(str(e)))
+                error_msg = str(e)
+                self.after(0, lambda: self._on_calibration_error(error_msg))
 
         threading.Thread(target=do_calibration, daemon=True).start()
 

@@ -46,7 +46,7 @@ class AnalysisConfig:
         max_circularity: Максимальная циркулярность (>порога = не волос).
         vellus_threshold_um: Порог Vellus в микронах (клинический стандарт 30 мкм).
         intermediate_threshold_um: Порог Intermediate/Terminal в микронах.
-        threshold_method: Метод бинаризации ('otsu' | 'intermodes').
+        threshold_method: Метод бинаризации ('otsu' | 'adaptive').
     """
 
     # Калибровка
@@ -264,7 +264,9 @@ def load_config(path: Path | None = None) -> Config:
         logger.info("Конфигурация загружена из %s", path)
         return config
     except (json.JSONDecodeError, TypeError, ValueError) as e:
-        logger.warning("Ошибка чтения конфигурации %s: %s, используются значения по умолчанию", path, e)
+        logger.warning(
+            "Ошибка чтения конфигурации %s: %s, используются значения по умолчанию", path, e
+        )
         return Config()
 
 

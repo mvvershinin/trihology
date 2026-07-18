@@ -141,7 +141,8 @@ trihology/
 │   │   ├── classification.py   # Terminal/Vellus/Intermediate
 │   │   ├── calibration.py      # Автокалибровка по шкале
 │   │   ├── camera.py           # V4L2 захват (Linux)
-│   │   └── stats.py            # Плотность, сравнение зон
+│   │   ├── stats.py            # Плотность, сравнение зон
+│   │   └── diagnosis.py        # Диагностические выводы по зонам
 │   ├── gui/                    # tkinter UI (зависит от Core)
 │   │   ├── __init__.py
 │   │   ├── app.py              # Главное окно + Notebook
@@ -162,29 +163,36 @@ trihology/
 │   └── utils/                  # Общие утилиты
 │       ├── __init__.py
 │       ├── config.py           # AnalysisConfig dataclass
-│       └── image_utils.py      # CV↔tkinter конвертация
-├── tests/                      # Тесты
+│       ├── image_utils.py      # CV↔tkinter конвертация
+│       └── resources.py        # Пути к ресурсам (репо / PyInstaller sys._MEIPASS)
+├── tests/                      # Тесты (синтетика генерируется в conftest, без бинарных fixtures)
 │   ├── __init__.py
-│   ├── conftest.py             # Общие фикстуры
-│   ├── fixtures/               # Тестовые изображения
+│   ├── conftest.py             # Общие фикстуры: синтетические снимки, temp-БД
 │   ├── test_segmentation.py
 │   ├── test_measurement.py
 │   ├── test_classification.py
 │   ├── test_calibration.py
 │   ├── test_stats.py
+│   ├── test_diagnosis.py
 │   ├── test_database.py
-│   └── test_analyzer.py
-├── assets/                     # Ресурсы приложения
-│   ├── icon.png
-│   └── zone_diagram.png
+│   ├── test_analyzer.py
+│   └── test_camera.py          # Через monkeypatch cv2.VideoCapture, без железа
+├── assets/                     # Ресурсы приложения (включаются в сборку datas=[('assets','assets')])
+│   ├── icon.png                # Иконка приложения (плейсхолдер фазы упаковки — заменить дизайн-версией)
+│   └── fonts/                  # DejaVu Sans (кириллица) — задел под PDF-отчёты v1.1
+│       ├── DejaVuSans.ttf
+│       ├── DejaVuSans-Bold.ttf
+│       └── LICENSE-DejaVu.txt
 ├── pyproject.toml              # Единый центр конфигурации (метаданные, ruff, mypy, pytest, import-linter)
 ├── .pre-commit-config.yaml     # Хуки: ruff + lint-imports
 ├── requirements.txt            # Зависимости (пины = [project.dependencies])
 ├── requirements-dev.txt        # Dev зависимости (пины = [project.optional-dependencies.dev])
-├── build.spec                  # PyInstaller конфигурация (планируется, фаза упаковки)
-├── install-udev.sh             # Установка USB правил (планируется, фаза упаковки)
+├── run_phototrichogram.py      # Лаунчер-стаб для PyInstaller (точка входа Analysis в build.spec)
+├── build.spec                  # PyInstaller конфигурация (сборка: pyinstaller build.spec)
+├── build-appimage.sh           # Сборка AppImage из dist/ (нужен appimagetool в PATH)
+├── install-udev.sh             # Установка USB-правил (sudo bash install-udev.sh)
 ├── CLAUDE.md                   # Инструкции для AI-агентов
-├── LICENSE                     # MIT (планируется)
+├── LICENSE                     # MIT
 ├── README.md                   # GitHub README
 └── .gitignore
 ```
@@ -227,14 +235,16 @@ layers = [
 Dev: `pytest>=8,<10`, `pytest-cov>=5,<8`, `mypy>=1.10,<3`, `ruff>=0.15,<0.16`
 (в паре с rev хука pre-commit), `import-linter>=2.0`, `pre-commit>=4,<5`.
 
-### Baseline качества (зафиксирован 2026-07-18)
+### Качество кода (состояние на 2026-07-18)
 
-Снят при внедрении тулинга; исправление — отдельная задача
-(`docs/todo/2026-07-18_tooling-modernization.md`, раздел «Отложено»):
+Исходный baseline (ruff 35 / mypy strict 214) полностью закрыт в тот же день,
+история — в `docs/todo/2026-07-18_tooling-modernization.md`. Текущее состояние,
+поддерживаемое pre-commit хуками:
 
-- ruff: 35 ошибок (19 автофиксируемых через `--fix`)
-- mypy strict: 214 ошибок (основное: tkinter-стабы `**kwargs`, непараметризованный `np.ndarray`, matplotlib-колбэки)
-- lint-imports: контракт проходит без нарушений
+- ruff: 0 ошибок
+- mypy strict: 0 ошибок (targeted ignore только на дырах стабов matplotlib/tkinter)
+- lint-imports: контракт слоёв проходит без нарушений
+- pytest: 260 тестов, покрытие core/ и data/ — 88–100%
 
 ---
 
@@ -347,25 +357,25 @@ class AnalysisError(PhototrichogramError):
 
 ## Дорожная карта
 
-### v1.0 — MVP (текущая цель)
+### v1.0 — MVP (выполнено)
 - [x] Архитектура и инструкции для агентов
-- [ ] Core: пайплайн анализа (сегментация → измерение → классификация)
-- [ ] Core: калибровка микроскопа
-- [ ] Core: камера V4L2
-- [ ] Data: SQLite схема, CRUD
-- [ ] GUI: захват + анализ + калибровка
-- [ ] Tests: core + data
-- [ ] Сборка: PyInstaller
+- [x] Core: пайплайн анализа (сегментация → измерение → классификация)
+- [x] Core: калибровка микроскопа
+- [x] Core: камера V4L2
+- [x] Data: SQLite схема, CRUD
+- [x] GUI: захват + анализ + калибровка
+- [x] Tests: core + data (258 тестов, покрытие core/data 88–100%)
+- [x] Сборка: PyInstaller (build.spec, onedir; AppImage — build-appimage.sh при наличии appimagetool)
 
 ### v1.1 — Профили и история
-- [ ] GUI: пациенты (CRUD)
-- [ ] GUI: история измерений
-- [ ] Reports: PDF-отчёт
+- [x] GUI: пациенты (CRUD)
+- [x] GUI: история измерений
+- [ ] Reports: PDF-отчёт (отложено 2026-07-18; шрифты уже в assets/fonts/)
 
 ### v1.2 — Мультизональный анализ
-- [ ] Core: анализ 4 зон + сравнение с контролем
-- [ ] GUI: вкладка мультизонального анализа
-- [ ] Reports: сводный отчёт
+- [x] Core: анализ 4 зон + сравнение с контролем
+- [x] GUI: вкладка мультизонального анализа
+- [ ] Reports: сводный отчёт (отложено вместе с PDF)
 
 ### v1.3 — Мониторинг
 - [ ] GUI: графики динамики

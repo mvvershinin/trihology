@@ -38,11 +38,11 @@ class StatusBar(ttk.Frame):
         status.set_indicator("green")
     """
 
-    def __init__(self, parent: tk.Widget, **kwargs: Any) -> None:
+    def __init__(self, parent: tk.Misc, **kwargs: Any) -> None:
         """Инициализация статусбара.
 
         Args:
-            parent: Родительский виджет.
+            parent: Родительский виджет (окно или контейнер).
             **kwargs: Аргументы ttk.Frame.
         """
         super().__init__(parent, **kwargs)
@@ -199,7 +199,7 @@ class ImageCanvas(ttk.Frame):
         self._pan_start_x: int = 0
         self._pan_start_y: int = 0
 
-    def show_numpy(self, image: "Any") -> None:
+    def show_numpy(self, image: Any) -> None:
         """Отобразить numpy (BGR) изображение.
 
         Использует image_utils для конвертации без cv2.
@@ -251,7 +251,7 @@ class ImageCanvas(ttk.Frame):
         if w <= 0 or h <= 0:
             return
 
-        resized = self._pil_image.resize((w, h), Image.LANCZOS)
+        resized = self._pil_image.resize((w, h), Image.Resampling.LANCZOS)
         self._photo_image = ImageTk.PhotoImage(resized)
 
         self._canvas.delete("all")
@@ -260,18 +260,18 @@ class ImageCanvas(ttk.Frame):
         )
         self._canvas.configure(scrollregion=(0, 0, w, h))
 
-    def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_mousewheel(self, event: tk.Event) -> None:
         """Зум колесом мыши (Windows/macOS)."""
         if event.delta > 0:
             self._apply_zoom(self.ZOOM_STEP)
         else:
             self._apply_zoom(1.0 / self.ZOOM_STEP)
 
-    def _on_mousewheel_linux_up(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_mousewheel_linux_up(self, event: tk.Event) -> None:
         """Зум колесом мыши вверх (Linux)."""
         self._apply_zoom(self.ZOOM_STEP)
 
-    def _on_mousewheel_linux_down(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_mousewheel_linux_down(self, event: tk.Event) -> None:
         """Зум колесом мыши вниз (Linux)."""
         self._apply_zoom(1.0 / self.ZOOM_STEP)
 
@@ -288,15 +288,15 @@ class ImageCanvas(ttk.Frame):
             self._zoom = new_zoom
             self._render()
 
-    def _on_pan_start(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_pan_start(self, event: tk.Event) -> None:
         """Начало панорамирования."""
         self._canvas.scan_mark(event.x, event.y)
 
-    def _on_pan_move(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_pan_move(self, event: tk.Event) -> None:
         """Панорамирование (drag)."""
         self._canvas.scan_dragto(event.x, event.y, gain=1)
 
-    def _on_reset_zoom(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_reset_zoom(self, event: tk.Event) -> None:
         """Сброс зума на 100% (двойной клик)."""
         self._zoom = 1.0
         self._render()
@@ -336,12 +336,12 @@ class ToolTip:
         widget.bind("<Unmap>", self._on_leave)
         widget.bind("<Destroy>", self._on_leave)
 
-    def _on_enter(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_enter(self, event: tk.Event) -> None:
         """Курсор наведён — запланировать показ подсказки."""
         self._cancel()
         self._after_id = self._widget.after(self._delay, self._show)
 
-    def _on_leave(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_leave(self, event: tk.Event) -> None:
         """Курсор ушёл — скрыть подсказку."""
         self._cancel()
         self._hide()
@@ -440,35 +440,35 @@ class ScrollableFrame(ttk.Frame):
         self.interior.bind("<Enter>", self._bind_mousewheel)
         self.interior.bind("<Leave>", self._unbind_mousewheel)
 
-    def _on_interior_configure(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_interior_configure(self, event: tk.Event) -> None:
         """Обновление scrollregion при изменении размера содержимого."""
         self._canvas.configure(scrollregion=self._canvas.bbox("all"))
 
-    def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_canvas_configure(self, event: tk.Event) -> None:
         """Растягивание содержимого по ширине канваса."""
         self._canvas.itemconfig(self._interior_id, width=event.width)
 
-    def _bind_mousewheel(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _bind_mousewheel(self, event: tk.Event) -> None:
         """Привязка прокрутки колесом мыши."""
         self._canvas.bind_all("<Button-4>", self._on_mousewheel_up)
         self._canvas.bind_all("<Button-5>", self._on_mousewheel_down)
         self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
-    def _unbind_mousewheel(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _unbind_mousewheel(self, event: tk.Event) -> None:
         """Отвязка прокрутки колесом мыши."""
         self._canvas.unbind_all("<Button-4>")
         self._canvas.unbind_all("<Button-5>")
         self._canvas.unbind_all("<MouseWheel>")
 
-    def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_mousewheel(self, event: tk.Event) -> None:
         """Прокрутка колесом (Windows/macOS)."""
         self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-    def _on_mousewheel_up(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_mousewheel_up(self, event: tk.Event) -> None:
         """Прокрутка колесом вверх (Linux)."""
         self._canvas.yview_scroll(-1, "units")
 
-    def _on_mousewheel_down(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+    def _on_mousewheel_down(self, event: tk.Event) -> None:
         """Прокрутка колесом вниз (Linux)."""
         self._canvas.yview_scroll(1, "units")
 
@@ -507,7 +507,10 @@ class ImageFileDialog:
 
         if initial_dir is not None and Path(initial_dir).is_dir():
             self._initial_dir = str(initial_dir)
-        elif ImageFileDialog._last_directory is not None and ImageFileDialog._last_directory.is_dir():
+        elif (
+            ImageFileDialog._last_directory is not None
+            and ImageFileDialog._last_directory.is_dir()
+        ):
             self._initial_dir = str(ImageFileDialog._last_directory)
         else:
             self._initial_dir = str(Path.home())

@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
-from collections import defaultdict
 from tkinter import ttk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import matplotlib
+
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -56,7 +56,7 @@ class HistoryTab(ttk.Frame):
     - Графики динамики плотности и T/V ratio по зонам
     """
 
-    def __init__(self, parent: tk.Widget, app: App, **kwargs: object) -> None:
+    def __init__(self, parent: tk.Widget, app: App, **kwargs: Any) -> None:
         """Инициализация вкладки истории.
 
         Args:
@@ -168,8 +168,13 @@ class HistoryTab(ttk.Frame):
             left=0.08, right=0.95, top=0.88, bottom=0.22, wspace=0.3,
         )
 
-        self._canvas_widget = FigureCanvasTkAgg(self._figure, master=charts_frame)
-        self._canvas_widget.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        # matplotlib backend (backend_tkagg) не типизирован → no-untyped-call
+        self._canvas_widget = FigureCanvasTkAgg(  # type: ignore[no-untyped-call]
+            self._figure, master=charts_frame,
+        )
+        self._canvas_widget.get_tk_widget().grid(  # type: ignore[no-untyped-call]
+            row=0, column=0, sticky="nsew",
+        )
 
         # Плейсхолдер для графиков
         self._charts_placeholder = ttk.Label(
@@ -195,23 +200,28 @@ class HistoryTab(ttk.Frame):
             return
 
         self._patient_name_var.set(patient.name)
+        # Активный пациент загружен из БД — id гарантированно заполнен
+        patient_id = patient.id
+        assert patient_id is not None
 
         try:
             db = self._app.db
-            measurements = db.get_patient_measurements(patient.id)
-            sessions = db.get_patient_sessions(patient.id)
+            measurements = db.get_patient_measurements(patient_id)
+            sessions = db.get_patient_sessions(patient_id)
         except Exception as e:
-            logger.error("Ошибка загрузки данных пациента id=%d: %s", patient.id, e)
+            logger.error("Ошибка загрузки данных пациента id=%d: %s", patient_id, e)
             self._app.status_bar.set_error(f"Ошибка загрузки истории: {e}")
             return
 
         # Маппинг session_id -> дата
         session_dates: dict[int, str] = {}
         for s in sessions:
+            # Сессия загружена из БД — id заполнен
+            assert s.id is not None
             session_dates[s.id] = s.date
 
         self._populate_table(measurements, session_dates)
-        self._update_charts(patient.id)
+        self._update_charts(patient_id)
 
         count = len(measurements)
         self._app.status_bar.set_ready(
@@ -276,7 +286,7 @@ class HistoryTab(ttk.Frame):
         self._ax_tv.set_xlabel("Дата", fontsize=9)
         self._ax_tv.set_ylabel("T/V", fontsize=9)
 
-        self._canvas_widget.draw_idle()
+        self._canvas_widget.draw_idle()  # type: ignore[no-untyped-call]
 
     def _update_charts(self, patient_id: int) -> None:
         """Обновить графики динамики для пациента.
@@ -358,7 +368,7 @@ class HistoryTab(ttk.Frame):
             self._charts_placeholder.config(text="Нет данных для построения графиков")
             self._clear_charts()
 
-        self._canvas_widget.draw_idle()
+        self._canvas_widget.draw_idle()  # type: ignore[no-untyped-call]
 
     # ──────────────────────────── Событие вкладки ─────────────────────────────
 

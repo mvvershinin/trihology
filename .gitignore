@@ -7,6 +7,10 @@ __pycache__/
 dist/
 build/
 *.spec
+# build.spec — конфигурация сборки PyInstaller, часть репозитория
+# (проектные .spec-файлы иначе попали бы под общий паттерн *.spec выше,
+# который нужен для генерируемых/временных .spec-файлов других инструментов).
+!build.spec
 
 # Virtual environment
 .venv/

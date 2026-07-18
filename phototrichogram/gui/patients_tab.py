@@ -16,9 +16,8 @@ from __future__ import annotations
 import logging
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypedDict
 
-from phototrichogram.data.database import Database
 from phototrichogram.data.models import Patient
 
 if TYPE_CHECKING:
@@ -32,6 +31,15 @@ _GENDER_TO_DB = {"--": None, "М": "M", "Ж": "F"}
 _GENDER_FROM_DB = {None: "--", "M": "М", "F": "Ж"}
 
 
+class _PatientFormData(TypedDict):
+    """Данные формы пациента (имя обязательно, остальное опционально)."""
+
+    name: str
+    birth_date: str | None
+    gender: str | None
+    notes: str | None
+
+
 class PatientsTab(ttk.Frame):
     """Вкладка управления пациентами.
 
@@ -41,7 +49,7 @@ class PatientsTab(ttk.Frame):
     - Выбор активного пациента (двойной клик)
     """
 
-    def __init__(self, parent: tk.Widget, app: App, **kwargs: object) -> None:
+    def __init__(self, parent: tk.Widget, app: App, **kwargs: Any) -> None:
         """Инициализация вкладки пациентов.
 
         Args:
@@ -227,10 +235,7 @@ class PatientsTab(ttk.Frame):
 
         try:
             db = self._app.db
-            if query:
-                patients = db.search_patients(query)
-            else:
-                patients = db.get_all_patients()
+            patients = db.search_patients(query) if query else db.get_all_patients()
         except Exception as e:
             logger.error("Ошибка загрузки пациентов: %s", e)
             self._app.status_bar.set_error(f"Ошибка загрузки: {e}")
@@ -345,7 +350,7 @@ class PatientsTab(ttk.Frame):
         self._clear_form()
         self._tree.selection_remove(*self._tree.selection())
 
-    def _get_form_data(self) -> dict[str, str | None]:
+    def _get_form_data(self) -> _PatientFormData:
         """Получить данные из формы.
 
         Returns:
@@ -385,6 +390,8 @@ class PatientsTab(ttk.Frame):
             if self._selected_patient is not None:
                 # Обновление
                 pid = self._selected_patient.id
+                # Выбранный пациент загружен из БД — id гарантированно заполнен
+                assert pid is not None
                 db.update_patient(pid, **data)
                 self._app.status_bar.set_ready(f"Пациент обновлён: {data['name']}")
 
@@ -426,6 +433,8 @@ class PatientsTab(ttk.Frame):
         try:
             db = self._app.db
             pid = self._selected_patient.id
+            # Выбранный пациент загружен из БД — id гарантированно заполнен
+            assert pid is not None
 
             # Если удаляем активного пациента — сбросить
             active = self._app.active_patient

@@ -15,10 +15,11 @@ from __future__ import annotations
 import logging
 import sys
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class CameraProtocol(Protocol):
     вместо реальной камеры (Duck Typing).
     """
 
-    def read_frame(self) -> np.ndarray | None:
+    def read_frame(self) -> NDArray[np.uint8] | None:
         """Захват одного кадра. None если камера недоступна."""
         ...
 
@@ -177,7 +178,7 @@ class Camera:
         """
         return self._cap is not None and self._cap.isOpened()
 
-    def read_frame(self) -> np.ndarray | None:
+    def read_frame(self) -> NDArray[np.uint8] | None:
         """Захват одного кадра с камеры.
 
         Returns:
@@ -189,7 +190,8 @@ class Camera:
         assert self._cap is not None  # для mypy, после is_opened()
         ret, frame = self._cap.read()
         if ret:
-            return frame
+            # cv2 возвращает MatLike (Mat | ndarray) — кадр камеры это BGR uint8.
+            return cast(NDArray[np.uint8], frame)
 
         logger.warning("Не удалось захватить кадр с /dev/video%s", self._device_index)
         return None

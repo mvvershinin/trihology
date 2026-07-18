@@ -19,10 +19,9 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-
-import numpy as np
 
 from phototrichogram.gui.widgets import ImageCanvas, ImageFileDialog, ToolTip
 
@@ -48,7 +47,7 @@ class AnalysisTab(ttk.Frame):
     - Прогрессбар при анализе
     """
 
-    def __init__(self, parent: tk.Widget, app: App, **kwargs: object) -> None:
+    def __init__(self, parent: tk.Widget, app: App, **kwargs: Any) -> None:
         """Инициализация вкладки анализа.
 
         Args:
@@ -58,7 +57,7 @@ class AnalysisTab(ttk.Frame):
         """
         super().__init__(parent, **kwargs)
         self._app = app
-        self._current_image: np.ndarray | None = None
+        self._current_image: np.ndarray[Any, Any] | None = None
         self._analysis_result: AnalysisResult | None = None
         self._showing_annotated = False
 
@@ -180,8 +179,11 @@ class AnalysisTab(ttk.Frame):
         self._ax = self._figure.add_subplot(111)
         self._figure.tight_layout(pad=2.0)
 
-        self._chart_canvas = FigureCanvasTkAgg(self._figure, master=chart_frame)
-        self._chart_widget = self._chart_canvas.get_tk_widget()
+        # matplotlib backend (backend_tkagg) не типизирован → no-untyped-call
+        self._chart_canvas = FigureCanvasTkAgg(  # type: ignore[no-untyped-call]
+            self._figure, master=chart_frame,
+        )
+        self._chart_widget = self._chart_canvas.get_tk_widget()  # type: ignore[no-untyped-call]
         self._chart_widget.grid(row=0, column=0, sticky="nsew")
 
         self._draw_empty_histogram()
@@ -210,7 +212,7 @@ class AnalysisTab(ttk.Frame):
         else:
             self._app.status_bar.set_error(f"Не удалось загрузить: {path}")
 
-    def load_image_from_array(self, image: np.ndarray) -> None:
+    def load_image_from_array(self, image: np.ndarray[Any, Any]) -> None:
         """Загрузить изображение из numpy массива (из capture_tab).
 
         Args:
@@ -219,7 +221,7 @@ class AnalysisTab(ttk.Frame):
         self._set_image(image.copy())
         self._app.status_bar.set_ready("Изображение загружено из захвата")
 
-    def _set_image(self, image: np.ndarray) -> None:
+    def _set_image(self, image: np.ndarray[Any, Any]) -> None:
         """Установить текущее изображение и обновить UI.
 
         Args:
@@ -264,7 +266,8 @@ class AnalysisTab(ttk.Frame):
                 self.after(0, lambda: self._on_analysis_complete(result))
             except Exception as e:
                 logger.error("Ошибка анализа: %s", e)
-                self.after(0, lambda: self._on_analysis_error(str(e)))
+                error_msg = str(e)
+                self.after(0, lambda: self._on_analysis_error(error_msg))
 
         threading.Thread(target=do_analysis, daemon=True).start()
 
@@ -381,7 +384,7 @@ class AnalysisTab(ttk.Frame):
             fontsize=12, color="gray",
         )
         self._figure.tight_layout(pad=2.0)
-        self._chart_canvas.draw()
+        self._chart_canvas.draw()  # type: ignore[no-untyped-call]
 
     def _draw_histogram(self, result: AnalysisResult) -> None:
         """Нарисовать гистограмму толщин по результатам анализа.
@@ -419,8 +422,8 @@ class AnalysisTab(ttk.Frame):
             )
         if intermediate_t:
             self._ax.hist(
-                intermediate_t, bins=bins, color="#FFD93D",
-                alpha=0.7, label=f"Intermediate ({vellus_threshold:.0f}-{intermediate_threshold:.0f} мкм)",
+                intermediate_t, bins=bins, color="#FFD93D", alpha=0.7,
+                label=f"Intermediate ({vellus_threshold:.0f}-{intermediate_threshold:.0f} мкм)",
             )
         if terminal_t:
             self._ax.hist(
@@ -444,7 +447,7 @@ class AnalysisTab(ttk.Frame):
         self._ax.legend(fontsize=7, loc="upper right")
 
         self._figure.tight_layout(pad=2.0)
-        self._chart_canvas.draw()
+        self._chart_canvas.draw()  # type: ignore[no-untyped-call]
 
     # ──────────────────────────── Экспорт ─────────────────────────────────────
 

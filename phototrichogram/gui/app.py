@@ -20,6 +20,7 @@ from phototrichogram.data.models import Patient
 from phototrichogram.gui.widgets import StatusBar
 
 if TYPE_CHECKING:
+    from phototrichogram.core.analyzer import AnalysisResult
     from phototrichogram.utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -74,8 +75,10 @@ class App(tk.Tk):
 
         logger.info("Главное окно инициализировано")
 
+    # Свойство config намеренно перекрывает метод tk.Misc.config: приложение
+    # никогда не использует виджетный self.config(...), а отдаёт объект Config.
     @property
-    def config(self) -> Config:
+    def config(self) -> Config:  # type: ignore[override]
         """Текущая конфигурация приложения."""
         return self._config
 
@@ -346,7 +349,8 @@ class App(tk.Tk):
             analysis_tab = self._tabs.get("analysis")
             if analysis_tab is not None and hasattr(analysis_tab, "load_image_from_path"):
                 analysis_tab.load_image_from_path(path)
-                self._notebook.select(analysis_tab)
+                # ttk.Notebook.select не типизирован в stubs typeshed
+                self._notebook.select(analysis_tab)  # type: ignore[no-untyped-call]
                 self._status_bar.set_ready(f"Загружено: {path}")
             else:
                 self._status_bar.set_text(f"Файл выбран: {path}")
@@ -364,7 +368,7 @@ class App(tk.Tk):
         """Переключение на вкладку калибровки."""
         calibration_tab = self._tabs.get("calibration")
         if calibration_tab is not None:
-            self._notebook.select(calibration_tab)
+            self._notebook.select(calibration_tab)  # type: ignore[no-untyped-call]
 
     def _on_open_settings(self) -> None:
         """Открытие окна настроек параметров анализа."""
@@ -378,7 +382,7 @@ class App(tk.Tk):
             "Десктопное приложение для\n"
             "трихоскопического анализа волос\n"
             "с USB-микроскопа.\n\n"
-            "Python 3.10+ | tkinter | OpenCV\n\n"
+            "Python 3.11+ | tkinter | OpenCV\n\n"
             "Лицензия: MIT\n\n"
             "Результаты анализа являются вспомогательными\n"
             "и не заменяют консультацию специалиста.",
@@ -425,9 +429,9 @@ class App(tk.Tk):
         """
         tab = self._tabs.get(key)
         if tab is not None:
-            self._notebook.select(tab)
+            self._notebook.select(tab)  # type: ignore[no-untyped-call]
 
-    def navigate_to_results(self, zone_results: dict) -> None:
+    def navigate_to_results(self, zone_results: dict[str, AnalysisResult]) -> None:
         """Переключиться на вкладку результатов и загрузить данные.
 
         Вызывается из capture_tab после завершения мультизонального анализа.
@@ -438,7 +442,7 @@ class App(tk.Tk):
         results_tab = self._tabs.get("results")
         if results_tab is not None and hasattr(results_tab, "load_results"):
             results_tab.load_results(zone_results)
-            self._notebook.select(results_tab)
+            self._notebook.select(results_tab)  # type: ignore[no-untyped-call]
             self._status_bar.set_ready(
                 f"Результаты мультизонального анализа: {len(zone_results)} зон",
             )
@@ -453,8 +457,8 @@ class App(tk.Tk):
             Текущая вкладка или None.
         """
         try:
-            current = self._notebook.select()
-            for key, tab in self._tabs.items():
+            current = self._notebook.select()  # type: ignore[no-untyped-call]
+            for tab in self._tabs.values():
                 if str(tab) == str(current):
                     return tab
         except tk.TclError:
@@ -557,6 +561,7 @@ class _SettingsDialog(tk.Toplevel):
         """
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=5, pady=2)
 
+        var: tk.Variable
         if var_type == "int":
             var = tk.IntVar()
         elif var_type == "double":
@@ -581,7 +586,8 @@ class _SettingsDialog(tk.Toplevel):
         try:
             analysis = self._config.analysis
             for key, var in self._vars.items():
-                value = var.get()
+                # tk.Variable.get не типизирован в stubs typeshed (базовый класс)
+                value = var.get()  # type: ignore[no-untyped-call]
                 setattr(analysis, key, value)
 
             # Валидация критических параметров

@@ -25,6 +25,7 @@ dev = [
     "ruff>=0.15,<0.16",
     "import-linter>=2.0",
     "pre-commit>=4,<5",
+    "pyinstaller>=6,<7",
 ]
 
 [tool.setuptools.packages.find]
@@ -39,10 +40,11 @@ python_version = "3.11"
 strict = true
 warn_unused_configs = true
 
-# cv2 (opencv-python-headless) и fpdf (fpdf2) не публикуют полные стабы —
-# отключаем проверку отсутствующих импортов только для них.
+# cv2 (opencv-python-headless): стабы неполные — отключаем проверку
+# отсутствующих импортов только для него. fpdf2 с версии в venv поставляет
+# собственные стабы (py.typed), override для него не нужен.
 [[tool.mypy.overrides]]
-module = ["cv2", "cv2.*", "fpdf", "fpdf.*"]
+module = ["cv2", "cv2.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

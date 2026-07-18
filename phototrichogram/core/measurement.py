@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
 from phototrichogram.utils.config import AnalysisConfig
 
@@ -49,12 +50,12 @@ class HairMeasurement:
     circularity: float
     center: tuple[float, float]
     angle: float
-    contour: np.ndarray
+    contour: NDArray[np.int32]
     classification: str = ""
 
 
 def measure_hair(
-    contour: np.ndarray, config: AnalysisConfig
+    contour: NDArray[np.int32], config: AnalysisConfig
 ) -> HairMeasurement | None:
     """Измерение параметров одного волоса по контуру.
 
@@ -115,7 +116,7 @@ def measure_hair(
 
 
 def measure_all(
-    contours: list[np.ndarray], config: AnalysisConfig
+    contours: list[NDArray[np.int32]], config: AnalysisConfig
 ) -> list[HairMeasurement]:
     """Измерение параметров всех волос из списка контуров.
 

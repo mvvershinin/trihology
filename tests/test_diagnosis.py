@@ -12,18 +12,14 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from phototrichogram.core.analyzer import AnalysisResult
 from phototrichogram.core.diagnosis import (
-    DiagnosisReport,
-    ZoneDiagnosis,
     diagnose_multizone,
     diagnose_zone,
     get_zone_status,
 )
 from phototrichogram.core.stats import HairRatios, ThicknessStats
-
 
 # ---------------------------------------------------------------------------
 # Фикстуры
@@ -169,7 +165,7 @@ class TestDiagnoseZone:
         diag = diagnose_zone("F", result)
 
         assert diag.zone == "F"
-        assert diag.zone_name == "Фронтальная"
+        assert diag.zone_name == "Лобная"
         assert diag.status == "problem"
         # Должны быть находки о плотности, vellus, T/V, толщине
         findings_text = " ".join(diag.findings)
@@ -183,7 +179,7 @@ class TestDiagnoseZone:
         diag = diagnose_zone("P", result)
 
         assert diag.status == "attention"
-        assert diag.zone_name == "Париетальная"
+        assert diag.zone_name == "Теменная"
 
     def test_unknown_zone_code(self) -> None:
         """Неизвестный код зоны -> используется сам код как имя."""
@@ -495,7 +491,7 @@ class TestDiagnoseMultizone:
 
     def test_zone_names_correct(self) -> None:
         """Названия зон корректные."""
-        for code, name in [("F", "Фронтальная"), ("P", "Париетальная"),
+        for code, name in [("F", "Лобная"), ("P", "Теменная"),
                            ("T", "Височная"), ("O", "Затылочная")]:
             result = _make_result()
             diag = diagnose_zone(code, result)
@@ -526,6 +522,6 @@ class TestDiagnoseMultizone:
         }
         report = diagnose_multizone(zones)
 
-        # Должно быть "в фронтальной", а не "в фронтальная"
-        assert "фронтальной" in report.conclusion
-        assert "в фронтальная" not in report.conclusion
+        # Должно быть "в лобной", а не "в лобная"
+        assert "лобной" in report.conclusion
+        assert "в лобная" not in report.conclusion

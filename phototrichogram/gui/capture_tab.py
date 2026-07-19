@@ -424,6 +424,16 @@ class CaptureTab(ttk.Frame):
         )
         self._disconnect_btn.pack(side="left", padx=(0, 5))
 
+        # Возврат к живому видео после просмотра снимка зоны в превью.
+        # Активна только когда камера подключена, а превью «заморожено» показом
+        # снимка (клик по миниатюре зоны останавливает живой поток).
+        self._live_btn = ttk.Button(
+            cam_frame, text="▶ Живое видео", command=self._resume_live_preview,
+            state="disabled", width=14,
+        )
+        self._live_btn.pack(side="left", padx=(0, 5))
+        ToolTip(self._live_btn, "Вернуть живое видео с камеры после просмотра снимка")
+
         # Статус камеры
         self._cam_status_var = tk.StringVar(value="Отключена")
         ttk.Label(cam_frame, textvariable=self._cam_status_var).pack(side="right", padx=5)
@@ -659,6 +669,7 @@ class CaptureTab(ttk.Frame):
         self._cam_status_var.set("Отключена")
         self._connect_btn.config(state="normal")
         self._disconnect_btn.config(state="disabled")
+        self._live_btn.config(state="disabled")
         self._no_camera_label.grid()
 
         # Отключить кнопки «Снимок» на карточках
@@ -784,14 +795,41 @@ class CaptureTab(ttk.Frame):
     def _on_zone_preview(self, zone_code: str, image: np.ndarray[Any, Any]) -> None:
         """Показать снимок зоны в большом превью.
 
+        Если камера подключена, живое превью «замораживается» — иначе поток
+        кадров тут же затёр бы показанный снимок. Вернуть живое видео можно
+        кнопкой «▶ Живое видео».
+
         Args:
             zone_code: Код зоны.
             image: BGR numpy array.
         """
+        camera_active = self._camera is not None
+        if camera_active:
+            # Остановить живой поток, чтобы снимок не затирался кадрами камеры.
+            self._is_previewing = False
+            self._live_btn.config(state="normal")
+
         self._image_canvas.show_numpy(image)
-        self._app.status_bar.set_text(
-            f"Превью: зона {zone_code} — {_ZONE_INFO[zone_code]['name']}",
-        )
+
+        if camera_active:
+            self._app.status_bar.set_text(
+                f"Снимок зоны {zone_code} — {_ZONE_INFO[zone_code]['name']} "
+                "(«▶ Живое видео» — вернуть камеру)",
+            )
+        else:
+            self._app.status_bar.set_text(
+                f"Превью: зона {zone_code} — {_ZONE_INFO[zone_code]['name']}",
+            )
+
+    def _resume_live_preview(self) -> None:
+        """Вернуть живое видео с камеры после просмотра снимка зоны."""
+        if self._camera is None:
+            self._live_btn.config(state="disabled")
+            return
+        self._live_btn.config(state="disabled")
+        self._is_previewing = True
+        self._update_preview()
+        self._app.status_bar.set_text("Живое видео с камеры")
 
     def _on_space_key(self, event: tk.Event) -> None:
         """Обработка нажатия Space — снимок если превью активно.

@@ -221,8 +221,22 @@ class HistoryTab(ttk.Frame):
         """Создание области графиков matplotlib."""
         charts_frame = ttk.LabelFrame(self, text="Динамика", padding=3)
         charts_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=(2, 5))
-        charts_frame.grid_rowconfigure(0, weight=1)
+        charts_frame.grid_rowconfigure(1, weight=1)  # график тянется, подсказка — нет
         charts_frame.grid_columnconfigure(0, weight=1)
+
+        # Заметная постоянная подсказка про двойной клик (в мелком блоке
+        # аннотации она терялась). Фон + жирный акцентный текст.
+        hint = tk.Label(
+            charts_frame,
+            text="🖱  Двойной клик по точке графика — открыть снимки зоны за эту дату",
+            font=("", 10, "bold"),
+            foreground="#0D47A1",
+            background="#FFF3C4",
+            anchor="center",
+            padx=6,
+            pady=4,
+        )
+        hint.grid(row=0, column=0, sticky="ew", pady=(0, 3))
 
         # Состояние интерактивных графиков
         self._annotation: Annotation | None = None
@@ -248,7 +262,7 @@ class HistoryTab(ttk.Frame):
             self._figure, master=charts_frame,
         )
         self._canvas_widget.get_tk_widget().grid(  # type: ignore[no-untyped-call]
-            row=0, column=0, sticky="nsew",
+            row=1, column=0, sticky="nsew",
         )
         # Клик по графику — показать/убрать аннотацию точки
         self._canvas_widget.mpl_connect("button_press_event", self._on_chart_click)

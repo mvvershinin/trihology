@@ -1082,11 +1082,13 @@ class CaptureTab(ttk.Frame):
             self._app.status_bar.set_error("Анализ не дал результатов")
             return
 
-        # Сохранить результаты в БД если есть активный пациент
-        self._save_results_to_db(results, zone_paths, zone_annotated_paths)
+        # Сохранить результаты в БД если есть активный пациент. session_id
+        # привязывает показанные результаты к конкретной сессии — экспорт PDF
+        # берёт именно её, а не «последнюю из базы» (провенанс меддокумента).
+        session_id = self._save_results_to_db(results, zone_paths, zone_annotated_paths)
 
         # Передать результаты во вкладку «Результаты»
-        self._app.navigate_to_results(results)
+        self._app.navigate_to_results(results, session_id)
 
         self._app.status_bar.set_ready(
             f"Анализ завершён: {len(results)} зон обработано",
@@ -1097,7 +1099,7 @@ class CaptureTab(ttk.Frame):
         results: dict[str, ZoneSeriesResult],
         zone_paths: dict[str, list[str | None]],
         zone_annotated_paths: dict[str, list[str | None]],
-    ) -> None:
+    ) -> int | None:
         """Сохранить результаты анализа в базу данных.
 
         Создаёт калибровку, сессию и измерения для активного пациента.
@@ -1113,13 +1115,18 @@ class CaptureTab(ttk.Frame):
             zone_paths: Пути файлов серии по зонам (параллельно снимкам зоны).
             zone_annotated_paths: Пути размеченных снимков по зонам (параллельно
                 снимкам зоны, та же позиция, что и zone_paths).
+
+        Returns:
+            id созданной сессии или None, если результаты не сохранены (пациент
+            не выбран или ошибка БД). id нужен, чтобы экспорт PDF брал именно ту
+            сессию, что показана на экране, а не «последнюю из базы».
         """
         patient = self._app.active_patient
         if patient is None:
             self._app.status_bar.set_text(
                 "Выберите пациента для сохранения результатов",
             )
-            return
+            return None
 
         try:
             db = self._app.db
@@ -1189,9 +1196,11 @@ class CaptureTab(ttk.Frame):
                 "Результаты сохранены: пациент id=%d, %d зон",
                 patient.id, len(results),
             )
+            return session.id
         except Exception as e:
             logger.error("Ошибка сохранения результатов в БД: %s", e)
             self._app.status_bar.set_error(f"Ошибка сохранения: {e}")
+            return None
 
     def _save_measurement_images(
         self,

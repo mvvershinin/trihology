@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
-from tkinter import ttk
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING, Any
 
 import matplotlib
@@ -33,10 +35,12 @@ from phototrichogram.gui.widgets import (
     format_tv_ratio,
     patient_norms,
 )
+from phototrichogram.reports.pdf_report import ReportData, generate_report
 
 if TYPE_CHECKING:
     from phototrichogram.core.analyzer import AnalysisResult
     from phototrichogram.core.norms import PatientNorms
+    from phototrichogram.data.models import Patient
     from phototrichogram.gui.app import App
     from phototrichogram.gui.series import ZoneSeriesResult
 
@@ -280,6 +284,10 @@ class MultizoneTab(ttk.Frame):
         # показа разброса плотности. Ключи совпадают с _zone_results.
         self._zone_series: dict[str, ZoneSeriesResult] = {}
         self._zone_cards: dict[str, _ZoneResultCard] = {}
+        # id сессии, в которую сохранены показанные результаты (или None, если
+        # не сохранены). Экспорт PDF строится по ЭТОЙ сессии — иначе выгрузил бы
+        # чужие/старые данные, не соответствующие числам на экране.
+        self._current_session_id: int | None = None
 
         self._create_widgets()
         logger.info("Вкладка результатов инициализирована")
@@ -530,21 +538,31 @@ class MultizoneTab(ttk.Frame):
         )
         self._detail_text.grid(row=0, column=0, sticky="nsew")
 
-        # Кнопка экспорта (placeholder)
+        # Кнопка экспорта в PDF. Активна только при наличии результатов и
+        # выбранного пациента (см. _update_export_button); отчёт формируется
+        # по сохранённой последней сессии пациента.
         export_frame = ttk.Frame(right_frame)
         export_frame.grid(row=1, column=0, sticky="ew", pady=(5, 0))
 
         self._export_btn = ttk.Button(
             export_frame,
-            text="Экспорт отчёта (в разработке)",
+            text="Экспорт в PDF",
+            command=self._on_export_pdf,
             state="disabled",
         )
         self._export_btn.pack(side="right")
-        ToolTip(self._export_btn, "Экспорт результатов в PDF (в разработке)")
+        ToolTip(
+            self._export_btn,
+            "Экспорт результатов последней сессии пациента в PDF",
+        )
 
     # ──────────────────────────── Публичный API ───────────────────────────────
 
-    def load_results(self, zone_results: dict[str, ZoneSeriesResult]) -> None:
+    def load_results(
+        self,
+        zone_results: dict[str, ZoneSeriesResult],
+        session_id: int | None = None,
+    ) -> None:
         """Загрузить результаты мультизонального анализа.
 
         Обновляет справочный блок норм, карточки зон, графики и сбрасывает
@@ -560,9 +578,12 @@ class MultizoneTab(ttk.Frame):
 
         Args:
             zone_results: Словарь {код_зоны: ZoneSeriesResult}.
+            session_id: id сессии этих результатов в БД, или None (не сохранены).
+                Экспорт PDF использует именно эту сессию.
         """
         self._zone_series = zone_results
         self._zone_results = {z: zsr.result for z, zsr in zone_results.items()}
+        self._current_session_id = session_id
 
         # Единый источник норм на весь вызов: справочный блок, раскраска
         # карточек и линии норм на графике используют один PatientNorms.
@@ -581,8 +602,8 @@ class MultizoneTab(ttk.Frame):
             "Нажмите на карточку зоны для просмотра деталей",
         )
 
-        # Активировать экспорт (placeholder)
-        self._export_btn.config(state="disabled")
+        # Кнопка экспорта активна при наличии результатов и выбранного пациента.
+        self._update_export_button()
 
         logger.info(
             "Результаты мультизонального анализа загружены: %d зон",
@@ -594,13 +615,203 @@ class MultizoneTab(ttk.Frame):
 
         Активный пациент мог смениться на другой вкладке — пересчитываем
         справочный блок норм и (если результаты уже загружены) раскраску
-        карточек и линии норм на графике под текущего пациента.
+        карточек и линии норм на графике под текущего пациента, а также
+        доступность кнопки экспорта (зависит от выбранного пациента).
         """
         norms = self._current_norms()
         self._update_norms_panel(norms)
         if self._zone_results:
             self._refresh_zone_cards(norms)
             self._draw_comparison_chart(self._zone_results, norms)
+        self._update_export_button()
+
+    # ──────────────────────────── Экспорт в PDF ───────────────────────────────
+
+    def _update_export_button(self) -> None:
+        """Обновить доступность кнопки «Экспорт в PDF».
+
+        Кнопка активна только когда показанные результаты СОХРАНЕНЫ в сессию
+        (`_current_session_id` задан): отчёт формируется по этой конкретной
+        сессии. Если результаты не сохранены (анализ без пациента) или пациент
+        сменился — кнопка неактивна, чтобы не выгрузить данные не из показанных.
+        """
+        can_export = (
+            bool(self._zone_results)
+            and self._current_session_id is not None
+            and self._app.active_patient is not None
+        )
+        self._export_btn.config(state="normal" if can_export else "disabled")
+
+    def _on_export_pdf(self) -> None:
+        """Сформировать PDF-отчёт по сессии, показанной на экране.
+
+        Отчёт строится по КОНКРЕТНОЙ сессии (`_current_session_id`), которая
+        дала показанные результаты, а не по «последней сессии из базы» — иначе
+        при рассинхроне (сбой сохранения, смена пациента) в PDF попали бы числа,
+        не соответствующие экрану. Если результаты не сохранены — пользователь
+        предупреждается, экспорт не выполняется.
+
+        Ошибки подготовки данных и генерации PDF показываются через messagebox
+        и пишутся в лог; приложение не падает.
+        """
+        patient = self._app.active_patient
+        if patient is None:
+            messagebox.showwarning(
+                "Экспорт в PDF",
+                "Выберите пациента на вкладке «Пациенты».",
+                parent=self,
+            )
+            return
+
+        if self._current_session_id is None:
+            messagebox.showwarning(
+                "Экспорт в PDF",
+                "Показанные результаты не сохранены в базу\n"
+                "(анализ без выбранного пациента или ошибка сохранения).\n\n"
+                "Выберите пациента и выполните анализ заново — тогда результаты "
+                "сохранятся и их можно будет выгрузить в отчёт.",
+                parent=self,
+            )
+            return
+
+        try:
+            report_data = self._build_report_data(patient, self._current_session_id)
+        except Exception as e:
+            logger.error("Ошибка подготовки данных отчёта: %s", e)
+            messagebox.showerror(
+                "Экспорт в PDF",
+                f"Не удалось подготовить данные отчёта:\n{e}",
+                parent=self,
+            )
+            return
+
+        if report_data is None:
+            messagebox.showwarning(
+                "Экспорт в PDF",
+                "Не удалось загрузить сохранённую сессию для отчёта.",
+                parent=self,
+            )
+            return
+
+        # Стартовая папка диалога — настроенная папка отчётов
+        # (config.app.reports_dir). Создаём заранее, чтобы диалог открылся
+        # именно в ней; сбой создания не критичен — просто откроется в другом.
+        reports_dir = self._app.config.app.reports_dir
+        try:
+            Path(reports_dir).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning("Не удалось создать папку отчётов %s: %s", reports_dir, e)
+
+        output = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить отчёт PDF",
+            initialdir=reports_dir,
+            defaultextension=".pdf",
+            initialfile=self._default_report_filename(patient, report_data.today_iso),
+            filetypes=[("PDF", "*.pdf")],
+        )
+        if not output:
+            return
+
+        output_path = Path(output)
+        self._app.status_bar.set_busy("Формирование отчёта...")
+        # Форсируем перерисовку статусбара до синхронной генерации PDF.
+        self.update_idletasks()
+
+        try:
+            generate_report(report_data, output_path)
+        except Exception as e:
+            logger.error("Ошибка генерации PDF-отчёта: %s", e)
+            self._app.status_bar.set_error("Не удалось сформировать отчёт")
+            messagebox.showerror(
+                "Экспорт в PDF",
+                f"Не удалось сформировать отчёт:\n{e}",
+                parent=self,
+            )
+            return
+
+        self._app.status_bar.set_ready(f"Отчёт сохранён: {output_path}")
+        logger.info("PDF-отчёт сохранён: %s", output_path)
+        messagebox.showinfo(
+            "Экспорт в PDF",
+            f"Отчёт сохранён:\n{output_path}",
+            parent=self,
+        )
+
+    def _build_report_data(self, patient: Patient, session_id: int) -> ReportData | None:
+        """Собрать данные отчёта по КОНКРЕТНОЙ сессии (показанной на экране).
+
+        Берёт измерения именно этой сессии (session_id), её калибровку и дату.
+        Дата сессии идёт в отчёт как «дата исследования» отдельно от даты
+        формирования. Калибровка — строго из сессии: если записи нет, передаётся
+        None (отчёт покажет «не откалибровано»), НЕ подставляется чужая — иначе
+        в документ попал бы масштаб, которым не считались числа. Снимки зоны —
+        размеченный при наличии, иначе исходный. Нормы — персональные
+        (``patient_norms``).
+
+        Args:
+            patient: Активный пациент.
+            session_id: id сессии, давшей показанные результаты.
+
+        Returns:
+            Готовый ``ReportData`` либо None, если сессия/измерения не найдены.
+        """
+        db = self._app.db
+        session = db.get_session(session_id)
+        if session is None:
+            return None
+
+        measurements = db.get_session_measurements(session_id)
+        if not measurements:
+            return None
+
+        zone_measurements = {m.zone: m for m in measurements}
+
+        # Калибровка строго этой сессии; нет записи → None (не подставляем чужую).
+        calibration = db.get_calibration(session.calibration_id)
+
+        # Пути снимков по зонам: размеченный при наличии, иначе исходный.
+        # Несуществующие файлы отсеет сам генератор отчёта.
+        zone_images: dict[str, list[Path]] = {}
+        for m in measurements:
+            if m.id is None:
+                continue
+            paths = [
+                Path(img.annotated_image_path or img.image_path)
+                for img in db.get_measurement_images(m.id)
+                if (img.annotated_image_path or img.image_path)
+            ]
+            if paths:
+                zone_images[m.zone] = paths
+
+        return ReportData(
+            patient=patient,
+            today_iso=datetime.now().strftime("%Y-%m-%d"),
+            zone_measurements=zone_measurements,
+            calibration=calibration,
+            norms=patient_norms(patient),
+            zone_images=zone_images,
+            session_date=session.date,
+        )
+
+    @staticmethod
+    def _default_report_filename(patient: Patient, today_iso: str) -> str:
+        """Имя файла отчёта по умолчанию «отчёт_Фамилия_ГГГГ-ММ-ДД.pdf».
+
+        Фамилия — первое слово из ФИО; разделители пути из неё убираются,
+        чтобы значение оставалось именем файла, а не путём.
+
+        Args:
+            patient: Пациент (источник ФИО).
+            today_iso: Дата отчёта (ISO 8601) для суффикса имени.
+
+        Returns:
+            Имя файла с расширением .pdf.
+        """
+        parts = patient.name.split()
+        surname = parts[0] if parts else "пациент"
+        surname = surname.replace("/", "_").replace("\\", "_")
+        return f"отчёт_{surname}_{today_iso}.pdf"
 
     # ──────────────────────────── Внутренняя логика ───────────────────────────
 

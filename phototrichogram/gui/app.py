@@ -477,7 +477,11 @@ class App(tk.Tk):
         if tab is not None:
             self._notebook.select(tab)  # type: ignore[no-untyped-call]
 
-    def navigate_to_results(self, zone_results: dict[str, ZoneSeriesResult]) -> None:
+    def navigate_to_results(
+        self,
+        zone_results: dict[str, ZoneSeriesResult],
+        session_id: int | None = None,
+    ) -> None:
         """Переключиться на вкладку результатов и загрузить данные.
 
         Вызывается из capture_tab после завершения мультизонального анализа.
@@ -485,10 +489,12 @@ class App(tk.Tk):
         Args:
             zone_results: Словарь {код_зоны: ZoneSeriesResult} — усреднённые по
                 серии метрики зоны + число снимков и разброс плотности.
+            session_id: id сессии, в которую сохранены эти результаты, или None
+                (не сохранены). Экспорт PDF использует именно эту сессию.
         """
         results_tab = self._tabs.get("results")
         if results_tab is not None and hasattr(results_tab, "load_results"):
-            results_tab.load_results(zone_results)
+            results_tab.load_results(zone_results, session_id)
             self._notebook.select(results_tab)  # type: ignore[no-untyped-call]
             self._status_bar.set_ready(
                 f"Результаты мультизонального анализа: {len(zone_results)} зон",
@@ -546,8 +552,18 @@ class _SettingsDialog(tk.Toplevel):
         """
         super().__init__(parent)
         self.title("Параметры анализа")
-        self.geometry("470x740")
-        self.resizable(False, False)
+        # Высота вмещает все секции (контент ~820px) — иначе полоса кнопок
+        # («Сохранить») уезжала под нижний край и настройки нельзя было
+        # сохранить. Вертикальный ресайз разрешён как страховка: кнопки прибиты
+        # к низу окна (см. _create_widgets) и остаются видимы при любой высоте;
+        # ширина фиксирована (от неё зависит перенос строк подсказок).
+        # Высоту ограничиваем экраном: на низких ноутбуках (768px) окно 830px
+        # не влезло бы, и нижние кнопки снова оказались бы за краем. Ресайз
+        # вертикальный разрешён — при нехватке места окно можно растянуть/скроллом
+        # экрана добраться. Ширина фиксирована (перенос подсказок зависит от неё).
+        height = min(830, self.winfo_screenheight() - 80)
+        self.geometry(f"470x{height}")
+        self.resizable(False, True)
         self.transient(parent)
         self.grab_set()
 
@@ -559,9 +575,27 @@ class _SettingsDialog(tk.Toplevel):
         self._load_values()
 
     def _create_widgets(self) -> None:
-        """Создание виджетов диалога."""
+        """Создание виджетов диалога.
+
+        Полоса кнопок («Сохранить»/«Отмена») пакуется к нижнему краю Toplevel
+        ПЕРВОЙ (``side="bottom"``): так она резервирует себе место и остаётся
+        видимой, даже если суммарная высота секций превышает высоту окна.
+        Основной контент пакуется после неё сверху и занимает остаток.
+        """
+        # Полоса кнопок — к низу окна, ДО основного контента (резервирует место).
+        btn_frame = ttk.Frame(self, padding=(10, 8))
+        btn_frame.pack(side="bottom", fill="x")
+
+        ttk.Button(
+            btn_frame, text="Сохранить", command=self._on_save,
+        ).pack(side="right", padx=(5, 0))
+        ttk.Button(
+            btn_frame, text="Отмена", command=self.destroy,
+        ).pack(side="right")
+
+        # Основной контент — оставшееся пространство сверху.
         main_frame = ttk.Frame(self, padding=10)
-        main_frame.pack(fill="both", expand=True)
+        main_frame.pack(side="top", fill="both", expand=True)
 
         # Калибровка
         cal_frame = ttk.LabelFrame(main_frame, text="Калибровка", padding=5)
@@ -600,17 +634,6 @@ class _SettingsDialog(tk.Toplevel):
 
         # Хранение — папка автосохранения снимков
         self._add_storage(main_frame)
-
-        # Кнопки
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill="x", pady=(10, 0))
-
-        ttk.Button(
-            btn_frame, text="Сохранить", command=self._on_save,
-        ).pack(side="right", padx=(5, 0))
-        ttk.Button(
-            btn_frame, text="Отмена", command=self.destroy,
-        ).pack(side="right")
 
     def _add_field(
         self,
@@ -688,15 +711,17 @@ class _SettingsDialog(tk.Toplevel):
         ).grid(row=2, column=0, sticky="w", padx=5, pady=(3, 0))
 
     def _add_storage(self, parent: ttk.Widget) -> None:
-        """Секция «Хранение»: папка автосохранения снимков.
+        """Секция «Хранение»: папки снимков и PDF-отчётов.
 
-        Показывает текущий ``config.app.images_dir`` в поле только для чтения
-        (Entry ``state="readonly"``) и кнопку «Обзор…» для выбора каталога через
-        ``filedialog.askdirectory``. Значение хранится в отдельной
-        ``self._images_dir_var`` (НЕ в ``self._vars``): generic-цикл
-        ``_load_values`` / ``_on_save`` перебирает секцию ``analysis``, а
-        ``images_dir`` лежит в секции ``app`` — поэтому загрузка и сохранение
-        этого поля выполняются явно (см. ``_load_values`` и ``_on_save``).
+        Два пути только для чтения (Entry ``state="readonly"``) с кнопками
+        «Обзор…» (выбор каталога через ``filedialog.askdirectory``):
+        ``config.app.images_dir`` (автосохранение снимков) и
+        ``config.app.reports_dir`` (стартовая папка диалога «Сохранить отчёт
+        PDF», см. multizone_tab). Значения хранятся в отдельных
+        ``self._images_dir_var`` / ``self._reports_dir_var`` (НЕ в
+        ``self._vars``): generic-цикл ``_load_values`` / ``_on_save`` перебирает
+        секцию ``analysis``, а эти пути лежат в секции ``app`` — их загрузка и
+        сохранение выполняются явно (см. ``_load_values`` и ``_on_save``).
 
         Args:
             parent: Родительский фрейм диалога.
@@ -705,10 +730,10 @@ class _SettingsDialog(tk.Toplevel):
         storage_frame.pack(fill="x", pady=(0, 10))
         storage_frame.columnconfigure(0, weight=1)
 
+        # Папка снимков.
         ttk.Label(storage_frame, text="Папка снимков:").grid(
             row=0, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 2),
         )
-
         self._images_dir_var = tk.StringVar()
         self._images_dir_entry = ttk.Entry(
             storage_frame,
@@ -716,11 +741,9 @@ class _SettingsDialog(tk.Toplevel):
             state="readonly",
         )
         self._images_dir_entry.grid(row=1, column=0, sticky="we", padx=5, pady=2)
-
         ttk.Button(
             storage_frame, text="Обзор…", command=self._on_browse_images_dir,
         ).grid(row=1, column=1, sticky="e", padx=(0, 5), pady=2)
-
         ttk.Label(
             storage_frame,
             text="Сюда сохраняются снимки при включённом автосохранении.",
@@ -728,7 +751,30 @@ class _SettingsDialog(tk.Toplevel):
             foreground="#757575",
             wraplength=420,
             justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=(3, 0))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=(3, 8))
+
+        # Папка отчётов.
+        ttk.Label(storage_frame, text="Папка отчётов:").grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 2),
+        )
+        self._reports_dir_var = tk.StringVar()
+        self._reports_dir_entry = ttk.Entry(
+            storage_frame,
+            textvariable=self._reports_dir_var,
+            state="readonly",
+        )
+        self._reports_dir_entry.grid(row=4, column=0, sticky="we", padx=5, pady=2)
+        ttk.Button(
+            storage_frame, text="Обзор…", command=self._on_browse_reports_dir,
+        ).grid(row=4, column=1, sticky="e", padx=(0, 5), pady=2)
+        ttk.Label(
+            storage_frame,
+            text="Стартовая папка при сохранении PDF-отчёта.",
+            font=("", 8),
+            foreground="#757575",
+            wraplength=420,
+            justify="left",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=(3, 0))
 
     def _on_browse_images_dir(self) -> None:
         """Выбор папки автосохранения снимков через системный диалог.
@@ -750,6 +796,24 @@ class _SettingsDialog(tk.Toplevel):
             # Прокрутить поле к концу пути — виден последний (значимый) сегмент.
             self._images_dir_entry.xview_moveto(1.0)
 
+    def _on_browse_reports_dir(self) -> None:
+        """Выбор папки для PDF-отчётов через системный диалог.
+
+        Открывает ``askdirectory`` от текущей папки (или домашней, если текущей
+        нет). Выбранный путь пишется в ``self._reports_dir_var``; запись в
+        конфиг и создание каталога — при нажатии «Сохранить» (см. ``_on_save``).
+        """
+        current = self._reports_dir_var.get().strip()
+        initialdir = current if current and Path(current).is_dir() else str(Path.home())
+        chosen = filedialog.askdirectory(
+            parent=self,
+            title="Выберите папку для отчётов",
+            initialdir=initialdir,
+        )
+        if chosen:
+            self._reports_dir_var.set(chosen)
+            self._reports_dir_entry.xview_moveto(1.0)
+
     def _load_values(self) -> None:
         """Загрузка текущих значений из конфигурации."""
         analysis = self._config.analysis
@@ -758,8 +822,9 @@ class _SettingsDialog(tk.Toplevel):
             if value is not None:
                 var.set(value)
 
-        # Папка снимков лежит в секции app (не analysis) — грузим отдельно.
+        # Папки снимков и отчётов лежат в секции app (не analysis) — отдельно.
         self._images_dir_var.set(self._config.app.images_dir)
+        self._reports_dir_var.set(self._config.app.reports_dir)
 
     def _on_save(self) -> None:
         """Сохранение настроек."""
@@ -783,6 +848,13 @@ class _SettingsDialog(tk.Toplevel):
             if images_dir:
                 Path(images_dir).mkdir(parents=True, exist_ok=True)
                 self._config.app.images_dir = images_dir
+
+            # Папка отчётов (секция app). Создаётся сразу, чтобы диалог
+            # сохранения отчёта открывался в существующем каталоге.
+            reports_dir = self._reports_dir_var.get().strip()
+            if reports_dir:
+                Path(reports_dir).mkdir(parents=True, exist_ok=True)
+                self._config.app.reports_dir = reports_dir
 
             from phototrichogram.utils.config import save_config
             save_config(self._config)

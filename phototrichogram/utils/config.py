@@ -188,6 +188,8 @@ class AppConfig:
         log_level: Уровень логирования ('DEBUG', 'INFO', 'WARNING', 'ERROR').
         db_path: Путь к файлу SQLite базы данных.
         images_dir: Директория для сохранения снимков.
+        reports_dir: Директория для PDF-отчётов (стартовая папка диалога
+            «Сохранить отчёт PDF»).
         autosave: Автоматическое сохранение снимков при захвате.
         window_width: Начальная ширина окна.
         window_height: Начальная высота окна.
@@ -200,6 +202,7 @@ class AppConfig:
     log_level: str = "INFO"
     db_path: str = str(_DEFAULT_DATA_DIR / "phototrichogram.db")
     images_dir: str = str(_DEFAULT_DATA_DIR / "images")
+    reports_dir: str = str(_DEFAULT_DATA_DIR / "reports")
     autosave: bool = True
     window_width: int = 1200
     window_height: int = 800

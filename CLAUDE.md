@@ -48,7 +48,7 @@
 
 **Методология**: `docs/METHODOLOGY.md`
 **Архитектура**: `docs/ARCHITECTURE.md`
-**Задачи**: `docs/todo/*.md`
+**Задачи**: `docs/todo/BACKLOG.md` (единый трекер; датированные файлы — история)
 
 ---
 

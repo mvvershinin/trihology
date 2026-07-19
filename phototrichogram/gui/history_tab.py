@@ -11,10 +11,12 @@ Layout:
 - Снизу: два графика matplotlib (плотность, T/V ratio)
 
 Полосы нормы берутся из единого мостика ``gui.widgets.patient_norms``
-(персональные нормы активного пациента). Клик по точке графика показывает
-matplotlib-аннотацию с числовыми показателями измерения (без диагнозов).
+(персональные нормы активного пациента). Одиночный клик по точке графика
+показывает matplotlib-аннотацию с числовыми показателями измерения (без
+диагнозов); двойной клик по той же точке открывает окно со снимками этого
+измерения (серия до 5 кадров, ImageCanvas с зумом).
 
-НЕ импортирует cv2 — чисто GUI-слой.
+НЕ импортирует cv2 — чисто GUI-слой (снимки грузятся через PIL/ImageCanvas).
 """
 
 from __future__ import annotations
@@ -23,11 +25,14 @@ import contextlib
 import logging
 import math
 import tkinter as tk
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any
 
 import matplotlib
+from PIL import Image, ImageTk
 
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -35,7 +40,7 @@ from matplotlib.figure import Figure
 
 from phototrichogram.core.stats import TV_RATIO_MAX
 from phototrichogram.data.models import Measurement
-from phototrichogram.gui.widgets import format_tv_ratio, patient_norms
+from phototrichogram.gui.widgets import ImageCanvas, format_tv_ratio, patient_norms
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -43,6 +48,8 @@ if TYPE_CHECKING:
     from matplotlib.text import Annotation
 
     from phototrichogram.core.norms import PatientNorms
+    from phototrichogram.data.database import Database
+    from phototrichogram.data.models import MeasurementImage
     from phototrichogram.gui.app import App
 
 logger = logging.getLogger(__name__)
@@ -81,7 +88,8 @@ class _PointInfo:
     """Числовые показатели точки графика для аннотации по клику.
 
     Хранит только числа (без диагностических оценок): аннотация показывает
-    дату, зону и измеренные параметры.
+    дату, зону и измеренные параметры. Поле ``measurement_id`` привязывает
+    точку к измерению в БД — по нему двойной клик загружает снимки серии.
     """
 
     zone: str
@@ -90,6 +98,7 @@ class _PointInfo:
     vellus_pct: float
     tv_ratio: float
     mean_thickness_um: float
+    measurement_id: int
 
 
 @dataclass(frozen=True)
@@ -219,6 +228,9 @@ class HistoryTab(ttk.Frame):
         self._annotation: Annotation | None = None
         self._density_points: list[_SeriesPoint] = []
         self._tv_points: list[_SeriesPoint] = []
+        # Окно просмотра снимков — одно на вкладку, переиспользуется (см.
+        # _open_images_window); None пока ни разу не открывали.
+        self._images_window: _ImagesWindow | None = None
 
         # Figure с двумя subplot'ами
         self._figure = Figure(figsize=(10, 3.5), dpi=90)
@@ -465,6 +477,8 @@ class HistoryTab(ttk.Frame):
             )
 
             for x, date, m in zip(xs, s.dates, s.measurements, strict=True):
+                # Измерение загружено из БД — id заполнен (нужен для снимков)
+                assert m.id is not None
                 info = _PointInfo(
                     zone=s.zone,
                     date=date,
@@ -472,6 +486,7 @@ class HistoryTab(ttk.Frame):
                     vellus_pct=m.vellus_pct,
                     tv_ratio=m.tv_ratio,
                     mean_thickness_um=m.mean_thickness_um,
+                    measurement_id=m.id,
                 )
                 self._density_points.append((x, m.density_per_cm2, info))
                 tv_y = m.tv_ratio if m.tv_ratio < TV_RATIO_MAX else tv_sentinel_y
@@ -557,11 +572,16 @@ class HistoryTab(ttk.Frame):
     # ──────────────────────────── Интерактивность ─────────────────────────────
 
     def _on_chart_click(self, event: MouseEvent) -> None:
-        """Клик по графику: показать аннотацию точки либо убрать текущую.
+        """Клик по графику: аннотация точки (одиночный) или снимки (двойной).
 
-        Ищет ближайшую точку на оси, по которой кликнули; если она в радиусе
-        прицеливания — показывает аннотацию с числами измерения, иначе
-        (пустое место или клик вне осей) — убирает текущую аннотацию.
+        Ищет ближайшую точку на оси, по которой кликнули. Если она в радиусе
+        прицеливания: одиночный клик показывает аннотацию с числами измерения,
+        двойной — открывает окно со снимками этого измерения. Иначе (пустое
+        место или клик вне осей) — убирает текущую аннотацию.
+
+        Двойной и одиночный клик не конфликтуют: matplotlib на двойном клике
+        шлёт два события — первый press (dblclick=False) уже показал аннотацию,
+        второй (dblclick=True) открывает окно снимков.
 
         Args:
             event: Событие мыши matplotlib.
@@ -585,7 +605,28 @@ class HistoryTab(ttk.Frame):
             return
 
         x_data, y_data, info = nearest
+        if event.dblclick:
+            self._open_images_window(info)
+            return
         self._show_annotation(ax, x_data, y_data, info)
+
+    def _open_images_window(self, info: _PointInfo) -> None:
+        """Открыть окно снимков измерения (двойной клик по точке графика).
+
+        Одно окно на вкладку: если оно уже открыто — переиспользуется (грузит
+        снимки выбранного измерения и поднимается на передний план), второе
+        окно не создаётся.
+
+        Args:
+            info: Данные точки, по которой сделан двойной клик.
+        """
+        zone_label = _ZONE_LABELS.get(info.zone, info.zone)
+        window = self._images_window
+        if window is not None and window.winfo_exists():
+            window.show(info.measurement_id, zone_label, info.date)
+            return
+        self._images_window = _ImagesWindow(self.winfo_toplevel(), self._app.db)
+        self._images_window.show(info.measurement_id, zone_label, info.date)
 
     def _nearest_point(
         self,
@@ -662,11 +703,14 @@ class HistoryTab(ttk.Frame):
     def _format_point_text(self, info: _PointInfo) -> str:
         """Текст аннотации точки — только числа, без диагноза.
 
+        Последняя строка — подсказка, что двойной клик по точке открывает
+        снимки этого измерения.
+
         Args:
             info: Числовые показатели точки.
 
         Returns:
-            Многострочный текст: дата, зона и измеренные параметры.
+            Многострочный текст: дата, зона, измеренные параметры и подсказка.
         """
         zone_label = _ZONE_LABELS.get(info.zone, info.zone)
         return (
@@ -674,7 +718,8 @@ class HistoryTab(ttk.Frame):
             f"Плотность: {info.density:.0f} волос/см²\n"
             f"Vellus: {info.vellus_pct:.1f}%\n"
             f"T/V: {format_tv_ratio(info.tv_ratio)}\n"
-            f"Толщина: {info.mean_thickness_um:.1f} мкм"
+            f"Толщина: {info.mean_thickness_um:.1f} мкм\n"
+            f"Двойной клик — снимки зоны"
         )
 
     def _dismiss_annotation(self) -> None:
@@ -695,3 +740,277 @@ class HistoryTab(ttk.Frame):
     def on_tab_selected(self) -> None:
         """Вызывается при переключении на эту вкладку — автообновление."""
         self.refresh()
+
+
+class _ImagesWindow(tk.Toplevel):
+    """Окно просмотра снимков одного измерения (серия до 5 кадров).
+
+    Миниатюры серии выстроены в ряд; клик по миниатюре открывает кадр крупно в
+    ImageCanvas (зум колесом, панорамирование, сброс двойным кликом). Если у
+    снимков есть размеченные версии — доступен переключатель «исходный /
+    размеченный».
+
+    Устойчиво к отсутствию файла на диске: запись в БД есть, а файла нет
+    (перемещён/удалён) — показывается заглушка «файл не найден», окно не падает.
+    Пустая серия (старые измерения до Phase 5a) — сообщение «Снимки не сохранены
+    для этого измерения». Escape и системная кнопка закрытия закрывают окно.
+
+    НЕ импортирует cv2 — снимки грузятся через PIL и показываются в ImageCanvas.
+    """
+
+    _THUMB_SIZE: int = 110
+    _MAX_THUMBS: int = 5
+    _BORDER_IDLE: str = "#555555"
+    _BORDER_ACTIVE: str = "#1E88E5"
+
+    def __init__(self, parent: tk.Tk | tk.Toplevel, db: Database) -> None:
+        """Создать пустой каркас окна (наполняется в show()).
+
+        Args:
+            parent: Родительское окно (Tk/Toplevel) для transient-привязки —
+                как возвращает ``winfo_toplevel()``.
+            db: База данных — источник списка снимков измерения.
+        """
+        super().__init__(parent)
+        self._db = db
+        self._images: list[MeasurementImage] = []
+        self._selected: int = 0
+        self._show_annotated_var = tk.BooleanVar(value=False)
+        # Ссылки на PhotoImage миниатюр — иначе tkinter удалит их сборщиком.
+        self._thumb_photos: list[object] = []
+        self._thumb_canvases: list[tk.Canvas] = []
+
+        with contextlib.suppress(tk.TclError):
+            self.transient(parent)
+        self.minsize(520, 460)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Escape>", lambda _e: self._close())
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        """Построить статичный каркас окна (переключатель, канвас, лента)."""
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        root = ttk.Frame(self, padding=6)
+        root.grid(row=0, column=0, sticky="nsew")
+        root.grid_rowconfigure(1, weight=1)
+        root.grid_columnconfigure(0, weight=1)
+
+        # Панель переключателя «исходный / размеченный»
+        top = ttk.Frame(root)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self._toggle = ttk.Checkbutton(
+            top,
+            text="Показать размеченный снимок",
+            variable=self._show_annotated_var,
+            command=self._render_selected,
+        )
+        # Виден только если в серии есть размеченные снимки (_rebuild_thumbnails).
+
+        # Крупный просмотр выбранного снимка
+        self._canvas = ImageCanvas(root, width=560, height=340)
+        self._canvas.grid(row=1, column=0, sticky="nsew")
+
+        # Лента миниатюр серии
+        self._thumb_frame = ttk.Frame(root, padding=(0, 6, 0, 0))
+        self._thumb_frame.grid(row=2, column=0, sticky="ew")
+
+        # Статусная строка (номер кадра, «файл не найден» и т.п.)
+        self._status_var = tk.StringVar(value="")
+        ttk.Label(
+            root, textvariable=self._status_var, anchor="w", foreground="#666666",
+        ).grid(row=3, column=0, sticky="ew", pady=(4, 0))
+
+    def show(self, measurement_id: int, zone_label: str, date: str) -> None:
+        """Загрузить снимки измерения и поднять окно на передний план.
+
+        Args:
+            measurement_id: ID измерения, чьи снимки показываем.
+            zone_label: Метка зоны для заголовка окна.
+            date: Дата измерения для заголовка окна.
+        """
+        self.title(f"Снимки: {zone_label}, {date}")
+        try:
+            self._images = self._db.get_measurement_images(measurement_id)
+        except Exception as e:
+            logger.error(
+                "Ошибка загрузки снимков измерения id=%d: %s", measurement_id, e,
+            )
+            self._images = []
+
+        self._selected = 0
+        self._show_annotated_var.set(False)
+        self._rebuild_thumbnails()
+        self._render_selected()
+
+        self.deiconify()
+        self.lift()
+        self.focus_set()
+
+    def _rebuild_thumbnails(self) -> None:
+        """Пересобрать ленту миниатюр и переключатель под текущую серию."""
+        for child in self._thumb_frame.winfo_children():
+            child.destroy()
+        self._thumb_photos = []
+        self._thumb_canvases = []
+
+        # Переключатель разметки — только если есть хотя бы один размеченный кадр.
+        if any(img.annotated_image_path for img in self._images):
+            self._toggle.pack(side="left")
+        else:
+            self._toggle.pack_forget()
+
+        if not self._images:
+            ttk.Label(
+                self._thumb_frame,
+                text="Снимки не сохранены для этого измерения",
+                foreground="#888888",
+            ).grid(row=0, column=0, sticky="w")
+            return
+
+        for index, img in enumerate(self._images[: self._MAX_THUMBS]):
+            self._add_thumbnail(index, img)
+        self._highlight_selected()
+
+    def _add_thumbnail(self, index: int, img: MeasurementImage) -> None:
+        """Добавить миниатюру кадра (или заглушку, если файла нет на диске).
+
+        Args:
+            index: Позиция кадра в серии (0-based).
+            img: Запись снимка серии.
+        """
+        holder = tk.Canvas(
+            self._thumb_frame,
+            width=self._THUMB_SIZE,
+            height=self._THUMB_SIZE,
+            bg="#2b2b2b",
+            highlightthickness=2,
+            highlightbackground=self._BORDER_IDLE,
+            cursor="hand2",
+        )
+        holder.grid(row=0, column=index, padx=3)
+        holder.bind("<Button-1>", self._make_thumb_handler(index))
+
+        thumb = self._load_thumbnail(Path(img.image_path))
+        if thumb is None:
+            holder.create_text(
+                self._THUMB_SIZE // 2,
+                self._THUMB_SIZE // 2,
+                text=f"#{index + 1}\nнет файла",
+                fill="#E57373",
+                justify="center",
+                font=("", 9),
+            )
+        else:
+            photo = ImageTk.PhotoImage(thumb)
+            self._thumb_photos.append(photo)
+            holder.create_image(
+                self._THUMB_SIZE // 2,
+                self._THUMB_SIZE // 2,
+                anchor="center",
+                image=photo,
+            )
+        self._thumb_canvases.append(holder)
+
+    def _make_thumb_handler(self, index: int) -> Callable[[tk.Event], None]:
+        """Собрать обработчик клика по миниатюре (замыкание по параметру).
+
+        Захват index через параметр метода, а не переменную цикла — исключает
+        общий баг с поздним связыванием в замыканиях.
+
+        Args:
+            index: Позиция миниатюры в серии.
+
+        Returns:
+            Функция-обработчик события клика.
+        """
+
+        def handler(_event: tk.Event) -> None:
+            self._select(index)
+
+        return handler
+
+    def _load_thumbnail(self, path: Path) -> Image.Image | None:
+        """Загрузить снимок и уменьшить до размера миниатюры.
+
+        Args:
+            path: Путь к файлу снимка.
+
+        Returns:
+            PIL-миниатюра или None, если файла нет либо он не читается.
+        """
+        if not path.exists():
+            logger.warning("Файл снимка не найден (миниатюра): %s", path)
+            return None
+        try:
+            pil: Image.Image = Image.open(path)
+            pil.load()
+            pil = pil.convert("RGB")
+        except (OSError, ValueError) as e:
+            logger.error("Ошибка чтения снимка %s: %s", path, e)
+            return None
+        pil.thumbnail((self._THUMB_SIZE, self._THUMB_SIZE), Image.Resampling.LANCZOS)
+        return pil
+
+    def _select(self, index: int) -> None:
+        """Выбрать миниатюру и показать соответствующий кадр крупно.
+
+        Args:
+            index: Позиция кадра в серии.
+        """
+        self._selected = index
+        self._highlight_selected()
+        self._render_selected()
+
+    def _highlight_selected(self) -> None:
+        """Подсветить рамку активной миниатюры, снять подсветку с прочих."""
+        for i, canvas in enumerate(self._thumb_canvases):
+            color = self._BORDER_ACTIVE if i == self._selected else self._BORDER_IDLE
+            canvas.configure(highlightbackground=color, highlightcolor=color)
+
+    def _render_selected(self) -> None:
+        """Показать выбранный кадр крупно с учётом переключателя разметки.
+
+        Устойчиво к отсутствию файла: если записанного в БД файла нет на диске
+        (перемещён/удалён) — показывает заглушку в статусе и пишет в лог, окно
+        не падает.
+        """
+        if not self._images:
+            self._canvas.clear()
+            self._status_var.set("")
+            return
+
+        self._selected = max(0, min(self._selected, len(self._images) - 1))
+        img = self._images[self._selected]
+
+        if self._show_annotated_var.get() and img.annotated_image_path:
+            path = Path(img.annotated_image_path)
+            kind = "размеченный"
+        else:
+            path = Path(img.image_path)
+            kind = "исходный"
+
+        total = len(self._images)
+        if not path.exists():
+            self._canvas.clear()
+            self._status_var.set(f"файл не найден: {path}")
+            logger.warning("Файл снимка не найден на диске: %s", path)
+            return
+
+        try:
+            pil = Image.open(path)
+            pil.load()
+        except (OSError, ValueError) as e:
+            self._canvas.clear()
+            self._status_var.set(f"не удалось открыть файл: {path}")
+            logger.error("Ошибка открытия снимка %s: %s", path, e)
+            return
+
+        self._canvas.show_pil(pil)
+        self._status_var.set(f"Снимок {self._selected + 1} из {total} ({kind})")
+
+    def _close(self) -> None:
+        """Закрыть окно снимков."""
+        self.destroy()

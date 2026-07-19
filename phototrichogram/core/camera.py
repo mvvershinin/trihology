@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
 import cv2
@@ -62,6 +63,34 @@ class DeviceInfo:
     height: int
 
 
+def _device_name(index: int) -> str:
+    """Стабильное имя видеоустройства (модель камеры) по индексу.
+
+    На Linux читает модель из sysfs
+    (``/sys/class/video4linux/video{i}/name``) — это имя не зависит от порядка
+    перечисления устройств, поэтому пригодно для запоминания выбора между
+    запусками (в отличие от ``/dev/videoN``, чей индекс может меняться).
+    Если sysfs недоступен (не Linux, нет файла) — fallback на ``/dev/videoN``.
+
+    Ограничение: две одинаковые модели камер вернут одно имя и неразличимы —
+    для таких случаев остаётся резервный подбор по индексу.
+
+    Args:
+        index: Индекс устройства (/dev/videoN).
+
+    Returns:
+        Модель камеры из sysfs либо ``/dev/video{index}``.
+    """
+    sysfs_name = Path(f"/sys/class/video4linux/video{index}/name")
+    try:
+        name = sysfs_name.read_text(encoding="utf-8").strip()
+        if name:
+            return name
+    except OSError:
+        pass
+    return f"/dev/video{index}"
+
+
 def list_devices(max_index: int = 10) -> list[DeviceInfo]:
     """Перечисление доступных видеоустройств V4L2.
 
@@ -73,6 +102,8 @@ def list_devices(max_index: int = 10) -> list[DeviceInfo]:
 
     Returns:
         Список DeviceInfo для каждого доступного устройства.
+        ``name`` — модель камеры из sysfs (стабильна между запусками),
+        либо ``/dev/videoN`` если модель прочитать не удалось.
     """
     devices: list[DeviceInfo] = []
 
@@ -86,7 +117,7 @@ def list_devices(max_index: int = 10) -> list[DeviceInfo]:
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             devices.append(DeviceInfo(
                 index=i,
-                name=f"/dev/video{i}",
+                name=_device_name(i),
                 width=w,
                 height=h,
             ))

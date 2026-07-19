@@ -32,6 +32,7 @@ from phototrichogram.gui.widgets import ImageCanvas, ImageFileDialog, ToolTip
 if TYPE_CHECKING:
     from phototrichogram.core.analyzer import AnalysisResult
     from phototrichogram.core.camera import Camera, DeviceInfo
+    from phototrichogram.data.models import Session
     from phototrichogram.gui.app import App
     from phototrichogram.gui.series import ZoneSeriesResult
 
@@ -104,6 +105,11 @@ class _ZoneCard(ttk.LabelFrame):
         self._on_preview_click = on_preview_click
         # Серия снимков зоны (BGR numpy). Пусто → зона не снята.
         self._images: list[np.ndarray[Any, Any]] = []
+        # Пути файлов серии, ПАРАЛЛЕЛЬНО _images (та же длина и порядок): путь
+        # к сохранённому снимку (автосохранённый кадр камеры или загруженный
+        # файл) либо None, если файла на диске нет (захват при выключенном
+        # автосохранении). Нужны для привязки снимков к измерению (история).
+        self._image_paths: list[str | None] = []
         self._photo_thumb: object | None = None  # ImageTk.PhotoImage reference
 
         self._create_widgets()
@@ -117,6 +123,16 @@ class _ZoneCard(ttk.LabelFrame):
     def images(self) -> list[np.ndarray[Any, Any]]:
         """Серия снимков зоны (копия списка, BGR numpy array'и)."""
         return list(self._images)
+
+    @property
+    def image_paths(self) -> list[str | None]:
+        """Пути файлов серии, параллельно :attr:`images` (та же длина и порядок).
+
+        Элемент — путь к сохранённому файлу снимка (автосохранённый кадр
+        камеры или загруженный из файла) либо None, если файла на диске нет
+        (захват при выключенном автосохранении).
+        """
+        return list(self._image_paths)
 
     @property
     def snapshot_count(self) -> int:
@@ -228,7 +244,11 @@ class _ZoneCard(ttk.LabelFrame):
         """
         self._capture_btn.config(state="normal" if available else "disabled")
 
-    def add_image(self, image: np.ndarray[Any, Any]) -> bool:
+    def add_image(
+        self,
+        image: np.ndarray[Any, Any],
+        source_path: str | None = None,
+    ) -> bool:
         """Добавить снимок в серию зоны и обновить миниатюру.
 
         Снимок добавляется в конец серии, миниатюрой становится последний
@@ -237,6 +257,10 @@ class _ZoneCard(ttk.LabelFrame):
 
         Args:
             image: BGR numpy array.
+            source_path: Путь к файлу снимка на диске (автосохранённый кадр
+                камеры или загруженный файл) или None, если файла нет.
+                Хранится параллельно изображению (:attr:`image_paths`) для
+                последующей привязки снимка к измерению (просмотр в истории).
 
         Returns:
             True если снимок добавлен, False если серия уже заполнена.
@@ -244,6 +268,7 @@ class _ZoneCard(ttk.LabelFrame):
         if self.is_full:
             return False
         self._images.append(image.copy())
+        self._image_paths.append(source_path)
         self._update_thumbnail()
         self._update_status()
         self._clear_btn.config(state="normal")
@@ -252,6 +277,7 @@ class _ZoneCard(ttk.LabelFrame):
     def clear_series(self) -> None:
         """Очистить всю серию снимков зоны."""
         self._images.clear()
+        self._image_paths.clear()
         self._photo_thumb = None
         self._thumb_canvas.delete("all")
         self._placeholder_id = self._thumb_canvas.create_text(
@@ -492,6 +518,42 @@ class CaptureTab(ttk.Frame):
 
     # ──────────────────────────── Управление камерой ──────────────────────────
 
+    def _preferred_device_index(self, devices: list[DeviceInfo]) -> int:
+        """Позиция сохранённого устройства в списке для предвыбора в комбобоксе.
+
+        Ищет ранее выбранное устройство (config.camera): сначала по имени —
+        оно надёжнее, т.к. индекс /dev/videoN может меняться между запусками и
+        подключениями, — затем по сохранённому индексу. Если ничего не найдено
+        (первый запуск, устройство отключено) — возвращает 0 (первое в списке).
+
+        Автоподключение НЕ выполняется: это только предвыбор в комбобоксе,
+        подключение остаётся ручным (кнопка «Подключить»).
+
+        Args:
+            devices: Непустой список обнаруженных устройств.
+
+        Returns:
+            Индекс элемента в ``devices`` для предвыбора (0 если совпадений нет).
+        """
+        cam = self._app.config.camera
+        # 1. Имя И индекс совпали — точное совпадение (различает одинаковые
+        #    модели камер, пока устройство на том же /dev/videoN).
+        if cam.device_name:
+            for i, d in enumerate(devices):
+                if d.name == cam.device_name and d.index == cam.device_index:
+                    return i
+        # 2. Только по имени модели — устойчиво к смене индекса /dev/videoN.
+        if cam.device_name:
+            for i, d in enumerate(devices):
+                if d.name == cam.device_name:
+                    return i
+        # 3. Только по сохранённому индексу.
+        for i, d in enumerate(devices):
+            if d.index == cam.device_index:
+                return i
+        # 4. Совпадений нет — первое устройство.
+        return 0
+
     def _update_device_list(self) -> None:
         """Обновить список доступных видеоустройств."""
         try:
@@ -504,7 +566,9 @@ class CaptureTab(ttk.Frame):
                     f"{d.name} ({d.width}x{d.height})" for d in devices
                 ]
                 self._device_combo["values"] = device_names
-                self._device_combo.current(0)
+                # Предвыбор ранее выбранного устройства (по имени/индексу из
+                # конфига). Молча НЕ подключаемся — только выделяем в списке.
+                self._device_combo.current(self._preferred_device_index(devices))
                 self._app.status_bar.set_text(
                     f"Обнаружено устройств: {len(devices)}",
                 )
@@ -546,6 +610,18 @@ class CaptureTab(ttk.Frame):
                 cam_config = self._app.config.camera
                 self._camera.set_resolution(cam_config.width, cam_config.height)
                 self._camera.set_fps(cam_config.fps)
+
+                # Запомнить выбранное устройство: имя надёжнее индекса
+                # (/dev/videoN плавает между запусками), храним оба. Сохраняем
+                # конфиг сразу — как active_patient_id, чтобы выбор пережил
+                # перезапуск и был предвыбран при следующем старте.
+                cam_config.device_index = device.index
+                cam_config.device_name = device.name
+                try:
+                    from phototrichogram.utils.config import save_config
+                    save_config(self._app.config)
+                except Exception as e:
+                    logger.warning("Не удалось сохранить выбор камеры: %s", e)
 
                 resolution = self._camera.get_resolution()
                 res_str = f"{resolution[0]}x{resolution[1]}" if resolution else "?"
@@ -656,7 +732,9 @@ class CaptureTab(ttk.Frame):
             from phototrichogram.utils.image_utils import load_image
             image = load_image(path)
             if image is not None:
-                card.add_image(image)
+                # Загруженный файл уже на диске — запоминаем его путь, чтобы
+                # снимок можно было привязать к измерению и открыть из истории.
+                card.add_image(image, source_path=str(path))
                 self._image_canvas.show_numpy(image)
                 self._update_zones_status()
                 self._app.status_bar.set_ready(
@@ -684,12 +762,16 @@ class CaptureTab(ttk.Frame):
             return
 
         frame_copy = np.copy(self._current_frame)
-        card.add_image(frame_copy)
-        self._update_zones_status()
 
-        # Автосохранение если включено
+        # Автосохранение ДО добавления в серию: путь запоминается в карточке
+        # зоны (source_path), чтобы затем привязать снимок к измерению и
+        # открыть его из истории. Если автосохранение выключено — path=None.
+        saved_path: str | None = None
         if self._app.config.app.autosave:
-            self._autosave_snapshot(frame_copy, zone_code)
+            saved_path = self._autosave_snapshot(frame_copy, zone_code)
+
+        card.add_image(frame_copy, source_path=saved_path)
+        self._update_zones_status()
 
         self._app.status_bar.set_ready(
             f"Зона {zone_code}: снимок добавлен (снимков: {card.snapshot_count}/5)",
@@ -749,26 +831,37 @@ class CaptureTab(ttk.Frame):
         else:
             self._analyze_btn.config(state="disabled")
 
-    def _autosave_snapshot(self, frame: np.ndarray[Any, Any], zone_code: str) -> None:
+    def _autosave_snapshot(
+        self, frame: np.ndarray[Any, Any], zone_code: str,
+    ) -> str | None:
         """Автоматическое сохранение снимка в директорию из конфига.
 
         Args:
             frame: BGR numpy array.
             zone_code: Код зоны для имени файла.
+
+        Returns:
+            Путь к сохранённому файлу (str) или None при ошибке. Путь
+            запоминается в карточке зоны для привязки снимка к измерению.
         """
         try:
             images_dir = Path(self._app.config.app.images_dir)
             images_dir.mkdir(parents=True, exist_ok=True)
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Микросекунды в имени: серия из нескольких кадров одной зоны
+            # снимается в пределах одной секунды — без %f файлы серии
+            # перезаписали бы друг друга (и в БД попал бы один путь на всех).
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"zone_{zone_code}_{timestamp}.png"
             path = images_dir / filename
 
             from phototrichogram.utils.image_utils import save_image
             save_image(frame, path)
             logger.debug("Автосохранение зоны %s: %s", zone_code, path)
+            return str(path)
         except Exception as e:
             logger.error("Ошибка автосохранения: %s", e)
+            return None
 
     # ──────────────────────────── Мультизональный анализ ──────────────────────
 
@@ -777,10 +870,15 @@ class CaptureTab(ttk.Frame):
         # Собрать серии снимков по зонам (копии — анализ идёт в фоне, пока
         # пользователь может очистить/дополнить карточку).
         zone_series: dict[str, list[np.ndarray[Any, Any]]] = {}
+        # Пути файлов серии по зонам (параллельно zone_series) — снимаем здесь
+        # же, в GUI-потоке, пока карточки не изменились фоновым анализом; нужны
+        # для привязки снимков к измерениям после сохранения в БД.
+        zone_paths: dict[str, list[str | None]] = {}
         for zone_code, card in self._zone_cards.items():
             images = card.images
             if images:
                 zone_series[zone_code] = [np.copy(img) for img in images]
+                zone_paths[zone_code] = card.image_paths
 
         if not zone_series:
             self._app.status_bar.set_text("Нет загруженных снимков для анализа")
@@ -836,7 +934,7 @@ class CaptureTab(ttk.Frame):
                     if per_snapshot:
                         results[zone_code] = aggregate_series(per_snapshot)
 
-                self.after(0, lambda: self._on_analysis_complete(results))
+                self.after(0, lambda: self._on_analysis_complete(results, zone_paths))
             except Exception as e:
                 logger.error("Ошибка мультизонального анализа: %s", e)
                 error_msg = str(e)
@@ -844,12 +942,18 @@ class CaptureTab(ttk.Frame):
 
         threading.Thread(target=do_analysis, daemon=True).start()
 
-    def _on_analysis_complete(self, results: dict[str, ZoneSeriesResult]) -> None:
+    def _on_analysis_complete(
+        self,
+        results: dict[str, ZoneSeriesResult],
+        zone_paths: dict[str, list[str | None]],
+    ) -> None:
         """Обработка завершения мультизонального анализа.
 
         Args:
             results: Словарь {код_зоны: ZoneSeriesResult} — усреднённые по
                 серии метрики зоны + число снимков и разброс плотности.
+            zone_paths: Пути файлов серии по зонам (параллельно снимкам зоны) —
+                для привязки к созданным измерениям (просмотр в истории).
         """
         self._progress.stop()
         self._progress.pack_forget()
@@ -860,7 +964,7 @@ class CaptureTab(ttk.Frame):
             return
 
         # Сохранить результаты в БД если есть активный пациент
-        self._save_results_to_db(results)
+        self._save_results_to_db(results, zone_paths)
 
         # Передать результаты во вкладку «Результаты»
         self._app.navigate_to_results(results)
@@ -869,16 +973,23 @@ class CaptureTab(ttk.Frame):
             f"Анализ завершён: {len(results)} зон обработано",
         )
 
-    def _save_results_to_db(self, results: dict[str, ZoneSeriesResult]) -> None:
+    def _save_results_to_db(
+        self,
+        results: dict[str, ZoneSeriesResult],
+        zone_paths: dict[str, list[str | None]],
+    ) -> None:
         """Сохранить результаты анализа в базу данных.
 
         Создаёт калибровку, сессию и измерения для активного пациента.
         Если пациент не выбран — показывает предупреждение в статусбаре.
         В каждое измерение пишутся усреднённые по серии метрики плюс
         n_snapshots (число снимков) и density_std (разброс плотности).
+        После создания измерений к ним привязываются файлы серии снимков
+        (:meth:`_save_measurement_images`) — для просмотра в истории.
 
         Args:
             results: Словарь {код_зоны: ZoneSeriesResult}.
+            zone_paths: Пути файлов серии по зонам (параллельно снимкам зоны).
         """
         patient = self._app.active_patient
         if patient is None:
@@ -936,12 +1047,17 @@ class CaptureTab(ttk.Frame):
             assert calibration_id is not None
 
             # Атомарное создание сессии со всеми измерениями
-            db.create_session_with_measurements(
+            session = db.create_session_with_measurements(
                 patient_id=patient_id,
                 calibration_id=calibration_id,
                 date=today,
                 measurements_data=measurements_data,
             )
+
+            # Привязать файлы серии снимков к созданным измерениям (для
+            # просмотра снимков в истории). Отдельная операция: её сбой не
+            # отменяет уже сохранённые измерения.
+            self._save_measurement_images(session, zone_paths)
 
             self._app.status_bar.set_ready(
                 f"Результаты сохранены для {patient.name} ({len(results)} зон)",
@@ -953,6 +1069,51 @@ class CaptureTab(ttk.Frame):
         except Exception as e:
             logger.error("Ошибка сохранения результатов в БД: %s", e)
             self._app.status_bar.set_error(f"Ошибка сохранения: {e}")
+
+    def _save_measurement_images(
+        self,
+        session: Session,
+        zone_paths: dict[str, list[str | None]],
+    ) -> None:
+        """Привязать файлы серии снимков к измерениям сессии.
+
+        Для каждой зоны находит созданное измерение (по коду зоны) и пишет
+        пути её снимков в таблицу measurement_images — по строке на снимок,
+        ordinal = позиция кадра в серии. Снимки без файла на диске (None —
+        захват при выключенном автосохранении) пропускаются.
+
+        Сбой записи снимков не критичен: измерения уже сохранены, зона просто
+        останется без привязанных снимков (как старые записи до Phase 5a),
+        поэтому ошибки логируются, но наверх не пробрасываются.
+
+        Args:
+            session: Только что созданная сессия (с заполненным id).
+            zone_paths: Пути файлов серии по зонам (параллельно снимкам зоны).
+        """
+        if session.id is None:
+            return
+        try:
+            db = self._app.db
+            # Сопоставляем код зоны с id её измерения в этой сессии: в одной
+            # сессии зона встречается один раз (по одному измерению на зону).
+            zone_to_measurement = {
+                m.zone: m.id for m in db.get_session_measurements(session.id)
+            }
+            for zone_code, paths in zone_paths.items():
+                measurement_id = zone_to_measurement.get(zone_code)
+                if measurement_id is None:
+                    continue
+                # Только снимки с реальным файлом на диске; ordinal сохраняет
+                # исходную позицию кадра в серии (пропущенные None не смещают).
+                images: list[dict[str, Any] | tuple[Any, ...]] = [
+                    {"image_path": path, "ordinal": ordinal}
+                    for ordinal, path in enumerate(paths)
+                    if path is not None
+                ]
+                if images:
+                    db.add_measurement_images(measurement_id, images)
+        except Exception as e:
+            logger.error("Ошибка привязки снимков серии к измерениям: %s", e)
 
     def _on_analysis_error(self, error_msg: str) -> None:
         """Обработка ошибки анализа.

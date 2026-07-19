@@ -94,10 +94,35 @@ class TestListDevices:
     def test_device_info_contains_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """DeviceInfo содержит корректное имя и разрешение."""
         monkeypatch.setattr(cv2, "VideoCapture", _make_fake_capture({0}))
+        # Имя устройства зависит от sysfs хоста — фиксируем детерминированно.
+        monkeypatch.setattr(
+            "phototrichogram.core.camera._device_name", lambda i: f"/dev/video{i}"
+        )
 
         devices = list_devices(max_index=1)
 
         assert devices == [DeviceInfo(index=0, name="/dev/video0", width=640, height=480)]
+
+    def test_device_name_reads_sysfs_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """_device_name читает модель камеры из sysfs, когда файл доступен."""
+        from phototrichogram.core import camera
+
+        monkeypatch.setattr(
+            camera.Path, "read_text", lambda self, encoding="utf-8": "USB Microscope\n"
+        )
+        assert camera._device_name(2) == "USB Microscope"
+
+    def test_device_name_fallback_when_sysfs_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Нет sysfs (не Linux / нет файла) -> имя откатывается на /dev/videoN."""
+        from phototrichogram.core import camera
+
+        def _raise(self: object, encoding: str = "utf-8") -> str:
+            raise OSError("no sysfs")
+
+        monkeypatch.setattr(camera.Path, "read_text", _raise)
+        assert camera._device_name(3) == "/dev/video3"
 
     def test_no_devices_available_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Ни одно устройство не открылось -> пустой список."""

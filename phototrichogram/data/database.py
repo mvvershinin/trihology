@@ -31,7 +31,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from phototrichogram.data.models import Calibration, Measurement, Patient, Session
+from phototrichogram.data.models import (
+    Calibration,
+    Measurement,
+    MeasurementImage,
+    Patient,
+    Session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +163,22 @@ _MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE measurements ADD COLUMN density_std  REAL
         """,
     ),
+    (
+        11,
+        """
+        CREATE TABLE IF NOT EXISTS measurement_images (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            measurement_id        INTEGER NOT NULL,
+            image_path            TEXT    NOT NULL,
+            annotated_image_path  TEXT,
+            ordinal               INTEGER NOT NULL DEFAULT 0,
+            created_at            TEXT    NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (measurement_id) REFERENCES measurements(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_measurement_images_measurement
+            ON measurement_images(measurement_id)
+        """,
+    ),
 ]
 
 
@@ -188,6 +210,49 @@ def _split_statements(sql: str) -> list[str]:
 def _now() -> str:
     """Текущее время UTC, формат 'YYYY-MM-DD HH:MM:SS'."""
     return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _normalize_measurement_image_entry(
+    index: int, item: dict[str, Any] | tuple[Any, ...]
+) -> tuple[str, str | None, int]:
+    """Приведение одного элемента серии снимков к кортежу для вставки в БД.
+
+    Используется методом ``Database.add_measurement_images()`` — каждый
+    снимок серии можно описать словарём с ключами ``image_path``
+    (обязательный), ``annotated_image_path`` (необязательный, по
+    умолчанию None) и ``ordinal`` (необязательный), либо кортежем
+    ``(image_path,)``, ``(image_path, annotated_image_path)`` или
+    ``(image_path, annotated_image_path, ordinal)``. Если ``ordinal`` не
+    указан явно — берётся позиция элемента в исходном списке (0-based),
+    что соответствует естественному порядку съёмки серии.
+
+    Args:
+        index: Позиция элемента в исходном списке (0-based) — значение
+            ordinal по умолчанию, если оно не задано явно.
+        item: Описание снимка — словарь или кортеж (см. выше).
+
+    Returns:
+        Кортеж (image_path, annotated_image_path, ordinal).
+
+    Raises:
+        ValueError: Если image_path отсутствует, пустой или состоит
+            только из пробелов.
+    """
+    if isinstance(item, dict):
+        image_path = item.get("image_path")
+        annotated_image_path = item.get("annotated_image_path")
+        ordinal = item.get("ordinal", index)
+    else:
+        image_path = item[0] if len(item) > 0 else None
+        annotated_image_path = item[1] if len(item) > 1 else None
+        ordinal = item[2] if len(item) > 2 else index
+
+    if not image_path or not str(image_path).strip():
+        raise ValueError(
+            f"Путь к снимку не может быть пустым (элемент серии #{index})"
+        )
+
+    return str(image_path), annotated_image_path, int(ordinal)
 
 
 # ─── Database ─────────────────────────────────────────────────────────────────
@@ -385,6 +450,17 @@ class Database:
             density_std=row["density_std"],
         )
 
+    def _row_to_measurement_image(self, row: sqlite3.Row) -> MeasurementImage:
+        """Конвертация строки БД в объект MeasurementImage."""
+        return MeasurementImage(
+            id=row["id"],
+            measurement_id=row["measurement_id"],
+            image_path=row["image_path"],
+            annotated_image_path=row["annotated_image_path"],
+            ordinal=row["ordinal"],
+            created_at=row["created_at"],
+        )
+
     # ── CRUD: Patient ─────────────────────────────────────────────────────────
 
     def add_patient(
@@ -542,8 +618,11 @@ class Database:
     def delete_patient(self, patient_id: int) -> bool:
         """Удаление пациента и всех связанных данных (сессий и измерений).
 
-        Удаление каскадное: сначала measurements, затем sessions, затем patient.
-        При ошибке — полный rollback.
+        Удаление каскадное: сначала measurement_images, затем measurements,
+        затем sessions, затем patient. Внешние ключи в схеме не используют
+        ON DELETE CASCADE (проект следует явному контролю удаления — см.
+        CLAUDE.md), поэтому дочерние строки удаляются вручную в правильном
+        порядке в одной транзакции. При ошибке — полный rollback.
 
         Args:
             patient_id: Первичный ключ пациента.
@@ -565,8 +644,17 @@ class Database:
                     ).fetchall()
                 ]
 
-                # Удаляем измерения для каждой сессии
+                # Удаляем снимки и измерения для каждой сессии
                 for sid in session_ids:
+                    conn.execute(
+                        """
+                        DELETE FROM measurement_images
+                        WHERE measurement_id IN (
+                            SELECT id FROM measurements WHERE session_id = ?
+                        )
+                        """,
+                        (sid,),
+                    )
                     conn.execute(
                         "DELETE FROM measurements WHERE session_id = ?", (sid,)
                     )
@@ -865,7 +953,11 @@ class Database:
         return sessions
 
     def delete_session(self, session_id: int) -> bool:
-        """Удаление сессии и всех её измерений.
+        """Удаление сессии и всех её измерений (вместе со снимками серии).
+
+        Удаление каскадное: сначала measurement_images, затем measurements,
+        затем сама session — явными DELETE в одной транзакции (в схеме нет
+        ON DELETE CASCADE, см. delete_patient()).
 
         Args:
             session_id: Первичный ключ сессии.
@@ -879,6 +971,15 @@ class Database:
         conn = self._get_conn()
         try:
             with conn:
+                conn.execute(
+                    """
+                    DELETE FROM measurement_images
+                    WHERE measurement_id IN (
+                        SELECT id FROM measurements WHERE session_id = ?
+                    )
+                    """,
+                    (session_id,),
+                )
                 conn.execute(
                     "DELETE FROM measurements WHERE session_id = ?", (session_id,)
                 )
@@ -1147,6 +1248,197 @@ class Database:
             zone, patient_id, len(measurements),
         )
         return measurements
+
+    # ── CRUD: MeasurementImage ───────────────────────────────────────────────
+
+    def add_measurement_image(
+        self,
+        measurement_id: int,
+        image_path: str,
+        annotated_image_path: str | None = None,
+        ordinal: int = 0,
+    ) -> MeasurementImage:
+        """Сохранение одного снимка серии, привязанного к измерению.
+
+        Каждый вызов — отдельная транзакция. Для сохранения сразу
+        нескольких снимков серии как одной атомарной операции (либо все,
+        либо ни одного) используйте add_measurement_images().
+
+        Args:
+            measurement_id: Внешний ключ на таблицу measurements (должно
+                существовать).
+            image_path: Путь к исходному снимку (обязательный, непустой).
+            annotated_image_path: Путь к аннотированному (размеченному)
+                снимку или None, если разметка для этого снимка не
+                сохранялась.
+            ordinal: Порядковый номер снимка в серии (обычно 0..4, 0 —
+                первый снимок). По умолчанию 0.
+
+        Returns:
+            Объект MeasurementImage с заполненным id и created_at.
+
+        Raises:
+            sqlite3.IntegrityError: Если measurement_id не существует.
+            sqlite3.Error: При других ошибках записи.
+            ValueError: Если image_path пустой.
+        """
+        if not image_path or not image_path.strip():
+            raise ValueError("Путь к снимку не может быть пустым")
+
+        now = _now()
+        conn = self._get_conn()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO measurement_images
+                        (measurement_id, image_path, annotated_image_path,
+                         ordinal, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (measurement_id, image_path, annotated_image_path, ordinal, now),
+                )
+                image_id = cursor.lastrowid
+        except sqlite3.IntegrityError as exc:
+            logger.error(
+                "Ошибка сохранения снимка: нарушение внешнего ключа "
+                "(measurement_id=%d): %s",
+                measurement_id,
+                exc,
+            )
+            raise
+        except sqlite3.Error as exc:
+            logger.error(
+                "Ошибка сохранения снимка измерения id=%d: %s", measurement_id, exc
+            )
+            raise
+
+        image = MeasurementImage(
+            id=image_id,
+            measurement_id=measurement_id,
+            image_path=image_path,
+            annotated_image_path=annotated_image_path,
+            ordinal=ordinal,
+            created_at=now,
+        )
+        logger.info(
+            "Сохранён снимок id=%d измерения id=%d (ordinal=%d)",
+            image_id, measurement_id, ordinal,
+        )
+        return image
+
+    def add_measurement_images(
+        self,
+        measurement_id: int,
+        images: list[dict[str, Any] | tuple[Any, ...]],
+    ) -> list[MeasurementImage]:
+        """Пакетное сохранение серии снимков одного измерения (одна транзакция).
+
+        Используется при сохранении серии до 5 контрольных снимков зоны
+        (METHODOLOGY.md, план v1.4 «серия снимков») — либо сохраняются
+        все снимки серии, либо (при ошибке) ни одного.
+
+        Каждый элемент images — словарь с ключами 'image_path'
+        (обязательный), 'annotated_image_path' (необязательный, по
+        умолчанию None) и 'ordinal' (необязательный; по умолчанию —
+        позиция элемента в списке, 0..N-1), либо кортеж (image_path,),
+        (image_path, annotated_image_path) или
+        (image_path, annotated_image_path, ordinal).
+
+        Args:
+            measurement_id: Внешний ключ на таблицу measurements — общий
+                для всех снимков серии.
+            images: Список описаний снимков (словари или кортежи, см.
+                выше). Пустой список допустим — тогда не сохраняется
+                ничего и возвращается пустой список.
+
+        Returns:
+            Список объектов MeasurementImage в том же порядке, что и
+            входной список images.
+
+        Raises:
+            ValueError: Если у какого-либо элемента пустой или
+                отсутствующий image_path. Проверяется до начала
+                транзакции — при ошибке в БД не сохраняется ничего.
+            sqlite3.IntegrityError: Если measurement_id не существует.
+            sqlite3.Error: При других ошибках записи — полный rollback.
+        """
+        # Валидация и нормализация всех элементов ДО открытия транзакции:
+        # если хотя бы один элемент некорректен, в БД не будет сделано ни
+        # одного обращения (нечего откатывать).
+        parsed = [
+            _normalize_measurement_image_entry(index, item)
+            for index, item in enumerate(images)
+        ]
+
+        now = _now()
+        conn = self._get_conn()
+        results: list[MeasurementImage] = []
+        try:
+            with conn:
+                for image_path, annotated_image_path, ordinal in parsed:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO measurement_images
+                            (measurement_id, image_path, annotated_image_path,
+                             ordinal, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (measurement_id, image_path, annotated_image_path, ordinal, now),
+                    )
+                    results.append(
+                        MeasurementImage(
+                            id=cursor.lastrowid,
+                            measurement_id=measurement_id,
+                            image_path=image_path,
+                            annotated_image_path=annotated_image_path,
+                            ordinal=ordinal,
+                            created_at=now,
+                        )
+                    )
+        except sqlite3.IntegrityError as exc:
+            logger.error(
+                "Ошибка сохранения серии снимков: нарушение внешнего ключа "
+                "(measurement_id=%d): %s",
+                measurement_id,
+                exc,
+            )
+            raise
+        except sqlite3.Error as exc:
+            logger.error(
+                "Ошибка сохранения серии снимков измерения id=%d: %s",
+                measurement_id,
+                exc,
+            )
+            raise
+
+        logger.info(
+            "Сохранена серия снимков измерения id=%d: %d файлов",
+            measurement_id, len(results),
+        )
+        return results
+
+    def get_measurement_images(self, measurement_id: int) -> list[MeasurementImage]:
+        """Список снимков серии измерения, отсортированный по ordinal.
+
+        Args:
+            measurement_id: Первичный ключ измерения.
+
+        Returns:
+            Список объектов MeasurementImage (может быть пустым — старые
+            измерения, сохранённые до Phase 5a, снимков не имеют).
+        """
+        rows = self._get_conn().execute(
+            "SELECT * FROM measurement_images WHERE measurement_id = ? "
+            "ORDER BY ordinal, id",
+            (measurement_id,),
+        ).fetchall()
+
+        images = [self._row_to_measurement_image(r) for r in rows]
+        logger.debug(
+            "Снимки измерения id=%d: %d записей", measurement_id, len(images)
+        )
+        return images
 
     # ── Транзакционные операции ───────────────────────────────────────────────
 

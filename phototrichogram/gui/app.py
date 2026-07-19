@@ -546,7 +546,7 @@ class _SettingsDialog(tk.Toplevel):
         """
         super().__init__(parent)
         self.title("Параметры анализа")
-        self.geometry("470x640")
+        self.geometry("470x740")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -597,6 +597,9 @@ class _SettingsDialog(tk.Toplevel):
 
         # Подсчёт волос — режим count_mode
         self._add_count_mode(main_frame)
+
+        # Хранение — папка автосохранения снимков
+        self._add_storage(main_frame)
 
         # Кнопки
         btn_frame = ttk.Frame(main_frame)
@@ -684,6 +687,69 @@ class _SettingsDialog(tk.Toplevel):
             justify="left",
         ).grid(row=2, column=0, sticky="w", padx=5, pady=(3, 0))
 
+    def _add_storage(self, parent: ttk.Widget) -> None:
+        """Секция «Хранение»: папка автосохранения снимков.
+
+        Показывает текущий ``config.app.images_dir`` в поле только для чтения
+        (Entry ``state="readonly"``) и кнопку «Обзор…» для выбора каталога через
+        ``filedialog.askdirectory``. Значение хранится в отдельной
+        ``self._images_dir_var`` (НЕ в ``self._vars``): generic-цикл
+        ``_load_values`` / ``_on_save`` перебирает секцию ``analysis``, а
+        ``images_dir`` лежит в секции ``app`` — поэтому загрузка и сохранение
+        этого поля выполняются явно (см. ``_load_values`` и ``_on_save``).
+
+        Args:
+            parent: Родительский фрейм диалога.
+        """
+        storage_frame = ttk.LabelFrame(parent, text="Хранение", padding=5)
+        storage_frame.pack(fill="x", pady=(0, 10))
+        storage_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(storage_frame, text="Папка снимков:").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 2),
+        )
+
+        self._images_dir_var = tk.StringVar()
+        self._images_dir_entry = ttk.Entry(
+            storage_frame,
+            textvariable=self._images_dir_var,
+            state="readonly",
+        )
+        self._images_dir_entry.grid(row=1, column=0, sticky="we", padx=5, pady=2)
+
+        ttk.Button(
+            storage_frame, text="Обзор…", command=self._on_browse_images_dir,
+        ).grid(row=1, column=1, sticky="e", padx=(0, 5), pady=2)
+
+        ttk.Label(
+            storage_frame,
+            text="Сюда сохраняются снимки при включённом автосохранении.",
+            font=("", 8),
+            foreground="#757575",
+            wraplength=420,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=(3, 0))
+
+    def _on_browse_images_dir(self) -> None:
+        """Выбор папки автосохранения снимков через системный диалог.
+
+        Открывает ``askdirectory`` от текущей папки (или домашней, если текущей
+        нет). Выбранный путь пишется в ``self._images_dir_var``; фактическая
+        запись в конфиг и создание каталога происходят при нажатии «Сохранить»
+        (см. ``_on_save``).
+        """
+        current = self._images_dir_var.get().strip()
+        initialdir = current if current and Path(current).is_dir() else str(Path.home())
+        chosen = filedialog.askdirectory(
+            parent=self,
+            title="Выберите папку для снимков",
+            initialdir=initialdir,
+        )
+        if chosen:
+            self._images_dir_var.set(chosen)
+            # Прокрутить поле к концу пути — виден последний (значимый) сегмент.
+            self._images_dir_entry.xview_moveto(1.0)
+
     def _load_values(self) -> None:
         """Загрузка текущих значений из конфигурации."""
         analysis = self._config.analysis
@@ -691,6 +757,9 @@ class _SettingsDialog(tk.Toplevel):
             value = getattr(analysis, key, None)
             if value is not None:
                 var.set(value)
+
+        # Папка снимков лежит в секции app (не analysis) — грузим отдельно.
+        self._images_dir_var.set(self._config.app.images_dir)
 
     def _on_save(self) -> None:
         """Сохранение настроек."""
@@ -705,6 +774,15 @@ class _SettingsDialog(tk.Toplevel):
             if analysis.um_per_px <= 0:
                 self._parent.status_bar.set_error("Масштаб (мкм/px) должен быть > 0")
                 return
+
+            # Папка снимков (секция «Хранение» → app.images_dir). Хранится вне
+            # generic-цикла analysis, поэтому пишем явно. Каталог создаётся сразу,
+            # чтобы автосохранение снимков не падало. mkdir может бросить OSError —
+            # он перехватывается общим except ниже.
+            images_dir = self._images_dir_var.get().strip()
+            if images_dir:
+                Path(images_dir).mkdir(parents=True, exist_ok=True)
+                self._config.app.images_dir = images_dir
 
             from phototrichogram.utils.config import save_config
             save_config(self._config)

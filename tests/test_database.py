@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from phototrichogram.data.database import _MIGRATIONS, Database
+from phototrichogram.data.database import _MIGRATIONS, Database, _split_statements
 
 # ---------------------------------------------------------------------------
 # Вспомогательные фабрики
@@ -65,7 +65,7 @@ class TestMigrations:
 
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
 
-        assert version == 10
+        assert version == 11
         db.close()
 
     def test_reopening_db_is_idempotent(self, tmp_path: Path) -> None:
@@ -77,7 +77,7 @@ class TestMigrations:
         db2 = Database(db_path)
         version = db2._conn.execute("PRAGMA user_version").fetchone()[0]
 
-        assert version == 10
+        assert version == 11
         db2.close()
 
     def test_fresh_db_has_ethnicity_column(self, temp_db: Database) -> None:
@@ -98,7 +98,8 @@ class TestMigrations:
         ethnicity (v9) без потери существующих данных, а старые пациенты --
         получить ethnicity = NULL (в модели -- None). Заодно применяются и
         все последующие миграции (например, v10 -- колонки серии снимков
-        measurements), версия схемы догоняет до последней (10).
+        measurements, v11 -- таблица measurement_images), версия схемы
+        догоняет до последней (11).
         """
         db_path = tmp_path / "legacy.db"
 
@@ -121,7 +122,7 @@ class TestMigrations:
         db = Database(db_path)
         try:
             version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-            assert version == 10
+            assert version == 11
 
             columns = {
                 row["name"]
@@ -147,14 +148,15 @@ class TestMigrations:
         assert "density_std" in columns
 
     def test_legacy_db_without_series_columns_is_migrated(self, tmp_path: Path) -> None:
-        """БД на версии схемы 9 (без n_snapshots/density_std) догоняет до v10.
+        """БД на версии схемы 9 (без n_snapshots/density_std) догоняет до текущей.
 
         Схема воспроизводится вручную из миграций 1..9 (без 10) -- имитация
         реальной базы пользователя, обновившегося с версии приложения до
         появления серии снимков (план v1.4). Открытие через Database должно
         добавить обе колонки без потери существующих измерений, а старые
         измерения -- получить n_snapshots=1, density_std=NULL (в модели --
-        None), как для одиночного снимка.
+        None), как для одиночного снимка. Заодно применяется и v11 (таблица
+        measurement_images), версия схемы догоняет до последней (11).
         """
         db_path = tmp_path / "legacy_v9.db"
 
@@ -193,7 +195,7 @@ class TestMigrations:
         db = Database(db_path)
         try:
             version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-            assert version == 10
+            assert version == 11
 
             columns = {
                 row["name"]
@@ -208,6 +210,105 @@ class TestMigrations:
             assert measurements[0].hair_count == 120
             assert measurements[0].n_snapshots == 1
             assert measurements[0].density_std is None
+        finally:
+            db.close()
+
+    def test_fresh_db_has_measurement_images_table(self, temp_db: Database) -> None:
+        """Свежая БД сразу содержит таблицу measurement_images (миграция v11)."""
+        columns = {
+            row["name"]
+            for row in temp_db._conn.execute(
+                "PRAGMA table_info(measurement_images)"
+            ).fetchall()
+        }
+
+        assert columns == {
+            "id",
+            "measurement_id",
+            "image_path",
+            "annotated_image_path",
+            "ordinal",
+            "created_at",
+        }
+
+    def test_fresh_db_has_measurement_images_index(self, temp_db: Database) -> None:
+        """Свежая БД сразу содержит индекс по measurement_id (миграция v11)."""
+        indexes = {
+            row["name"]
+            for row in temp_db._conn.execute(
+                "PRAGMA index_list(measurement_images)"
+            ).fetchall()
+        }
+
+        assert "idx_measurement_images_measurement" in indexes
+
+    def test_legacy_db_without_measurement_images_table_is_migrated(
+        self, tmp_path: Path
+    ) -> None:
+        """БД на версии схемы 10 (без measurement_images) догоняет до v11.
+
+        Схема воспроизводится вручную из миграций 1..10 -- имитация реальной
+        базы пользователя, обновившегося с версии приложения до появления
+        привязки снимков к измерениям (план v1.4, Phase 5a). Открытие через
+        Database должно создать таблицу measurement_images без потери
+        существующих измерений; у уже существующего измерения снимков нет
+        (таблица была создана пустой) -- get_measurement_images() возвращает
+        пустой список, а не ошибку.
+        """
+        db_path = tmp_path / "legacy_v10.db"
+
+        raw = sqlite3.connect(str(db_path))
+        try:
+            for version, sql in _MIGRATIONS:
+                if version >= 11:
+                    continue
+                for statement in _split_statements(sql):
+                    raw.execute(statement)
+            raw.execute(
+                "INSERT INTO patients (name, gender) VALUES (?, ?)",
+                ("Легаси Пациент", "F"),
+            )
+            raw.execute(
+                "INSERT INTO calibrations "
+                "(um_per_px, fov_width_px, fov_height_px, "
+                " fov_width_mm, fov_height_mm, fov_area_mm2) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (5.9, 640, 480, 3.776, 2.832, 10.694),
+            )
+            raw.execute(
+                "INSERT INTO sessions (patient_id, calibration_id, date) VALUES (?, ?, ?)",
+                (1, 1, "2026-01-01"),
+            )
+            raw.execute(
+                "INSERT INTO measurements (session_id, zone, hair_count, density_per_cm2) "
+                "VALUES (?, ?, ?, ?)",
+                (1, "F", 120, 210.5),
+            )
+            raw.commit()
+            raw.execute("PRAGMA user_version=10")
+            raw.commit()
+        finally:
+            raw.close()
+
+        db = Database(db_path)
+        try:
+            version = db._conn.execute("PRAGMA user_version").fetchone()[0]
+            assert version == 11
+
+            tables = {
+                row["name"]
+                for row in db._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            assert "measurement_images" in tables
+
+            measurements = db.get_session_measurements(1)
+            assert len(measurements) == 1
+            assert measurements[0].hair_count == 120
+
+            images = db.get_measurement_images(measurements[0].id)
+            assert images == []
         finally:
             db.close()
 
@@ -583,6 +684,32 @@ class TestSessionCrud:
 
         assert temp_db.get_session_measurements(session.id) == []
 
+    def test_delete_session_cascades_to_measurement_images(self, temp_db: Database) -> None:
+        """Удаление сессии удаляет и снимки, привязанные к её измерениям.
+
+        Без явного удаления measurement_images DELETE FROM measurements упал
+        бы с IntegrityError (внешний ключ measurement_images.measurement_id
+        без ON DELETE CASCADE) -- сам факт успешного возврата delete_session()
+        уже частично подтверждает каскад; дополнительно проверяем, что
+        строки в measurement_images физически исчезли.
+        """
+        patient_id, cal_id = self._make_patient_and_calibration(temp_db)
+        session = temp_db.add_session(patient_id, cal_id, date="2026-01-01")
+        meas = temp_db.save_measurement(
+            session_id=session.id, zone="F", **_measurement_kwargs()
+        )
+        temp_db.add_measurement_image(meas.id, image_path="/tmp/zone_F_1.png")
+
+        deleted = temp_db.delete_session(session.id)
+
+        assert deleted is True
+        assert temp_db.get_measurement_images(meas.id) == []
+        row_count = temp_db._conn.execute(
+            "SELECT COUNT(*) FROM measurement_images WHERE measurement_id = ?",
+            (meas.id,),
+        ).fetchone()[0]
+        assert row_count == 0
+
 
 # ---------------------------------------------------------------------------
 # CRUD: Measurement
@@ -722,6 +849,249 @@ class TestMeasurementCrud:
 
 
 # ---------------------------------------------------------------------------
+# CRUD: MeasurementImage
+# ---------------------------------------------------------------------------
+
+
+class TestMeasurementImageCrud:
+    """Тесты CRUD-операций для снимков серии, привязанных к измерению."""
+
+    def _make_measurement(self, db: Database) -> int:
+        patient = db.add_patient(name="Тест Пациент")
+        cal = db.add_calibration(um_per_px=5.9, fov_width_px=640, fov_height_px=480)
+        session = db.add_session(patient.id, cal.id, date="2026-01-01")
+        meas = db.save_measurement(session_id=session.id, zone="F", **_measurement_kwargs())
+        return meas.id
+
+    # -- add_measurement_image (одиночный снимок) ---------------------------
+
+    def test_add_measurement_image_returns_filled_object(self, temp_db: Database) -> None:
+        """Сохранённый снимок содержит id, created_at и переданные поля."""
+        meas_id = self._make_measurement(temp_db)
+
+        image = temp_db.add_measurement_image(
+            meas_id,
+            image_path="/data/zone_F_0.png",
+            annotated_image_path="/data/zone_F_0_annotated.png",
+            ordinal=0,
+        )
+
+        assert image.id is not None
+        assert image.measurement_id == meas_id
+        assert image.image_path == "/data/zone_F_0.png"
+        assert image.annotated_image_path == "/data/zone_F_0_annotated.png"
+        assert image.ordinal == 0
+        assert image.created_at is not None
+
+    def test_add_measurement_image_defaults_annotated_to_none(self, temp_db: Database) -> None:
+        """Без явного annotated_image_path -- поле сохраняется как None."""
+        meas_id = self._make_measurement(temp_db)
+
+        image = temp_db.add_measurement_image(meas_id, image_path="/data/zone_F_0.png")
+
+        assert image.annotated_image_path is None
+        reloaded = temp_db.get_measurement_images(meas_id)
+        assert reloaded[0].annotated_image_path is None
+
+    def test_add_measurement_image_defaults_ordinal_to_zero(self, temp_db: Database) -> None:
+        """Без явного ordinal -- по умолчанию 0."""
+        meas_id = self._make_measurement(temp_db)
+
+        image = temp_db.add_measurement_image(meas_id, image_path="/data/zone_F_0.png")
+
+        assert image.ordinal == 0
+
+    def test_add_measurement_image_empty_path_raises(self, temp_db: Database) -> None:
+        """Пустой (только из пробелов) image_path -> ValueError, ничего не сохраняется."""
+        meas_id = self._make_measurement(temp_db)
+
+        with pytest.raises(ValueError, match="не может быть пустым"):
+            temp_db.add_measurement_image(meas_id, image_path="   ")
+
+        assert temp_db.get_measurement_images(meas_id) == []
+
+    def test_add_measurement_image_invalid_measurement_raises_integrity_error(
+        self, temp_db: Database
+    ) -> None:
+        """Несуществующий measurement_id -> sqlite3.IntegrityError, без частичной записи."""
+        before = temp_db._conn.execute(
+            "SELECT COUNT(*) FROM measurement_images"
+        ).fetchone()[0]
+
+        with pytest.raises(sqlite3.IntegrityError):
+            temp_db.add_measurement_image(99999, image_path="/data/orphan.png")
+
+        after = temp_db._conn.execute(
+            "SELECT COUNT(*) FROM measurement_images"
+        ).fetchone()[0]
+        assert after == before
+
+    # -- get_measurement_images ----------------------------------------------
+
+    def test_get_measurement_images_empty_for_measurement_without_images(
+        self, temp_db: Database
+    ) -> None:
+        """У измерения без снимков (старые записи до Phase 5a) -- пустой список."""
+        meas_id = self._make_measurement(temp_db)
+
+        assert temp_db.get_measurement_images(meas_id) == []
+
+    def test_get_measurement_images_sorted_by_ordinal(self, temp_db: Database) -> None:
+        """Снимки возвращаются отсортированными по ordinal, а не по порядку вставки."""
+        meas_id = self._make_measurement(temp_db)
+        temp_db.add_measurement_image(meas_id, image_path="/data/img_2.png", ordinal=2)
+        temp_db.add_measurement_image(meas_id, image_path="/data/img_0.png", ordinal=0)
+        temp_db.add_measurement_image(meas_id, image_path="/data/img_1.png", ordinal=1)
+
+        images = temp_db.get_measurement_images(meas_id)
+
+        assert [img.ordinal for img in images] == [0, 1, 2]
+        assert [img.image_path for img in images] == [
+            "/data/img_0.png",
+            "/data/img_1.png",
+            "/data/img_2.png",
+        ]
+
+    def test_get_measurement_images_only_for_requested_measurement(
+        self, temp_db: Database
+    ) -> None:
+        """Снимки одного измерения не подмешиваются к снимкам другого."""
+        meas_a = self._make_measurement(temp_db)
+        meas_b = self._make_measurement(temp_db)
+        temp_db.add_measurement_image(meas_a, image_path="/data/a.png")
+        temp_db.add_measurement_image(meas_b, image_path="/data/b.png")
+
+        images_a = temp_db.get_measurement_images(meas_a)
+
+        assert len(images_a) == 1
+        assert images_a[0].image_path == "/data/a.png"
+
+    # -- add_measurement_images (пакетно, одна транзакция) --------------------
+
+    def test_add_measurement_images_batch_returns_all_in_order(self, temp_db: Database) -> None:
+        """Пакетная вставка серии возвращает объекты в том же порядке, что и вход."""
+        meas_id = self._make_measurement(temp_db)
+
+        images = temp_db.add_measurement_images(
+            meas_id,
+            [
+                {"image_path": "/data/s0.png"},
+                {"image_path": "/data/s1.png", "annotated_image_path": "/data/s1_ann.png"},
+                {"image_path": "/data/s2.png"},
+            ],
+        )
+
+        assert [img.image_path for img in images] == [
+            "/data/s0.png",
+            "/data/s1.png",
+            "/data/s2.png",
+        ]
+        assert images[1].annotated_image_path == "/data/s1_ann.png"
+        assert all(img.id is not None for img in images)
+
+    def test_add_measurement_images_defaults_ordinal_to_list_position(
+        self, temp_db: Database
+    ) -> None:
+        """Без явного ordinal у элемента -- берётся его позиция в списке (0-based)."""
+        meas_id = self._make_measurement(temp_db)
+
+        images = temp_db.add_measurement_images(
+            meas_id,
+            [{"image_path": "/data/s0.png"}, {"image_path": "/data/s1.png"}],
+        )
+
+        assert [img.ordinal for img in images] == [0, 1]
+
+    def test_add_measurement_images_accepts_tuples(self, temp_db: Database) -> None:
+        """Элементы серии можно описывать кортежами (image_path[, annotated[, ordinal]])."""
+        meas_id = self._make_measurement(temp_db)
+
+        images = temp_db.add_measurement_images(
+            meas_id,
+            [
+                ("/data/t0.png",),
+                ("/data/t1.png", "/data/t1_ann.png"),
+                ("/data/t2.png", None, 9),
+            ],
+        )
+
+        assert images[0].annotated_image_path is None
+        assert images[0].ordinal == 0
+        assert images[1].annotated_image_path == "/data/t1_ann.png"
+        assert images[1].ordinal == 1
+        assert images[2].ordinal == 9
+
+    def test_add_measurement_images_persisted_and_retrievable(self, temp_db: Database) -> None:
+        """Снимки, сохранённые пакетно, читаются обратно через get_measurement_images."""
+        meas_id = self._make_measurement(temp_db)
+        temp_db.add_measurement_images(
+            meas_id,
+            [{"image_path": "/data/p0.png"}, {"image_path": "/data/p1.png"}],
+        )
+
+        images = temp_db.get_measurement_images(meas_id)
+
+        assert len(images) == 2
+
+    def test_add_measurement_images_empty_list_saves_nothing(self, temp_db: Database) -> None:
+        """Пустой список -- допустим, ничего не сохраняется, возвращается []."""
+        meas_id = self._make_measurement(temp_db)
+
+        images = temp_db.add_measurement_images(meas_id, [])
+
+        assert images == []
+        assert temp_db.get_measurement_images(meas_id) == []
+
+    def test_add_measurement_images_invalid_entry_raises_and_saves_nothing(
+        self, temp_db: Database
+    ) -> None:
+        """Пустой image_path у ЛЮБОГО элемента -> ValueError, весь пакет не сохраняется.
+
+        Валидация всех элементов происходит до открытия транзакции -- даже
+        валидные элементы, идущие перед некорректным в списке, не должны
+        попасть в БД (атомарность "всё или ничего").
+        """
+        meas_id = self._make_measurement(temp_db)
+
+        with pytest.raises(ValueError):
+            temp_db.add_measurement_images(
+                meas_id,
+                [{"image_path": "/data/ok.png"}, {"image_path": "  "}],
+            )
+
+        assert temp_db.get_measurement_images(meas_id) == []
+
+    def test_add_measurement_images_invalid_measurement_raises_integrity_error(
+        self, temp_db: Database
+    ) -> None:
+        """Несуществующий measurement_id -> IntegrityError, ничего не сохраняется."""
+        with pytest.raises(sqlite3.IntegrityError):
+            temp_db.add_measurement_images(
+                99999,
+                [{"image_path": "/data/orphan0.png"}, {"image_path": "/data/orphan1.png"}],
+            )
+
+        count = temp_db._conn.execute(
+            "SELECT COUNT(*) FROM measurement_images"
+        ).fetchone()[0]
+        assert count == 0
+
+    def test_add_measurement_images_up_to_five_per_measurement(self, temp_db: Database) -> None:
+        """Типовой сценарий: до 5 снимков серии на одно измерение (METHODOLOGY v1.4)."""
+        meas_id = self._make_measurement(temp_db)
+
+        images = temp_db.add_measurement_images(
+            meas_id,
+            [{"image_path": f"/data/zone_F_{i}.png"} for i in range(5)],
+        )
+
+        assert len(images) == 5
+        assert [img.ordinal for img in temp_db.get_measurement_images(meas_id)] == [
+            0, 1, 2, 3, 4,
+        ]
+
+
+# ---------------------------------------------------------------------------
 # Каскадное удаление пациента
 # ---------------------------------------------------------------------------
 
@@ -753,6 +1123,27 @@ class TestCascadeDeletePatient:
 
         assert temp_db.get_patient(patient_b.id) is not None
         assert temp_db.get_session(session_b.id) is not None
+
+    def test_delete_patient_cascades_to_measurement_images(self, temp_db: Database) -> None:
+        """Удаление пациента удаляет и снимки, привязанные к его измерениям."""
+        patient = temp_db.add_patient(name="На полное удаление со снимками")
+        cal = temp_db.add_calibration(um_per_px=5.9, fov_width_px=640, fov_height_px=480)
+        session = temp_db.add_session(patient.id, cal.id, date="2026-01-01")
+        meas = temp_db.save_measurement(session_id=session.id, zone="F", **_measurement_kwargs())
+        temp_db.add_measurement_images(
+            meas.id,
+            [{"image_path": "/tmp/zone_F_1.png"}, {"image_path": "/tmp/zone_F_2.png"}],
+        )
+
+        deleted = temp_db.delete_patient(patient.id)
+
+        assert deleted is True
+        assert temp_db.get_measurement_images(meas.id) == []
+        row_count = temp_db._conn.execute(
+            "SELECT COUNT(*) FROM measurement_images WHERE measurement_id = ?",
+            (meas.id,),
+        ).fetchone()[0]
+        assert row_count == 0
 
 
 # ---------------------------------------------------------------------------

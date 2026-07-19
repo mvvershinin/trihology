@@ -8,6 +8,7 @@ Dataclass-модели для хранения данных в SQLite.
     Patient 1 → N Session
     Session N → 1 Calibration
     Session 1 → N Measurement
+    Measurement 1 → N MeasurementImage
 """
 
 from __future__ import annotations
@@ -185,3 +186,33 @@ class Measurement:
 
     n_snapshots: int = 1
     density_std: float | None = None
+
+
+@dataclass(frozen=True)
+class MeasurementImage:
+    """Один снимок серии, привязанный к измерению.
+
+    При анализе зоны можно сделать до 5 контрольных снимков
+    (METHODOLOGY.md, план v1.4 «серия снимков») — агрегированные
+    показатели усредняются по серии и хранятся в Measurement
+    (см. Measurement.n_snapshots), а пути к самим файлам снимков
+    хранятся отдельными строками этой таблицы: по одной строке на
+    снимок серии.
+
+    Attributes:
+        id: Первичный ключ (None до сохранения в БД).
+        measurement_id: Внешний ключ на таблицу measurements.
+        image_path: Путь к исходному снимку (абсолютный).
+        annotated_image_path: Путь к аннотированному (размеченному) снимку
+            или None, если разметка для этого снимка не сохранялась.
+        ordinal: Порядковый номер снимка в серии (обычно 0..4, 0 — первый
+            снимок серии). Используется для сортировки при отображении.
+        created_at: Дата создания записи (ISO 8601 datetime) или None.
+    """
+
+    id: int | None
+    measurement_id: int
+    image_path: str
+    annotated_image_path: str | None
+    ordinal: int
+    created_at: str | None

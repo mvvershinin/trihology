@@ -216,6 +216,10 @@ def thickness_statistics(measurements: list[HairMeasurement]) -> ThicknessStats:
 def _assess_zone(density_diff_pct: float, vellus_diff_pp: float) -> str:
     """Диагностическая оценка зоны по сравнению с контролем.
 
+    УСТАРЕЛО (2026-07-20): единые пороги, не зависящие от демографии. Актуальные
+    персональные нормы — в ``core/norms.py``. Используется только внутри
+    ``compare_zones`` и тестами, не в GUI/reports (см. модуль ``core/diagnosis``).
+
     Критерии (METHODOLOGY.md §4.8):
     - density_diff < -30% И vellus_diff > 10 пп → «Выраженная миниатюризация»
     - density_diff < -15% ИЛИ vellus_diff > 5 пп → «Начальная миниатюризация»

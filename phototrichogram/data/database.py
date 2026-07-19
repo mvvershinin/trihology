@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -274,7 +273,6 @@ class Database:
             db_path: Путь к файлу SQLite. Будет создан если не существует.
         """
         self.db_path = db_path
-        self._lock = threading.RLock()
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._conn: sqlite3.Connection | None = sqlite3.connect(

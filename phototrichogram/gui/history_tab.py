@@ -398,6 +398,11 @@ class HistoryTab(ttk.Frame):
         db = self._app.db
         series: list[_ZoneSeries] = []
 
+        # Даты сессий одним запросом (было N+1: get_session на каждое измерение).
+        session_dates = {
+            s.id: s.date for s in db.get_patient_sessions(patient_id) if s.id is not None
+        }
+
         for zone_code in _ZONE_ORDER:
             try:
                 history = db.get_zone_history(patient_id, zone_code)
@@ -411,13 +416,9 @@ class HistoryTab(ttk.Frame):
             dates: list[str] = []
             measurements: list[Measurement] = []
             for m in history:
-                session = db.get_session(m.session_id)
-                if session is not None:
-                    date_str = session.date
-                elif m.created_at:
-                    date_str = m.created_at[:10]
-                else:
-                    date_str = "--"
+                date_str = session_dates.get(m.session_id)
+                if date_str is None:
+                    date_str = m.created_at[:10] if m.created_at else "--"
                 dates.append(date_str)
                 measurements.append(m)
 
@@ -773,7 +774,6 @@ class _ImagesWindow(tk.Toplevel):
     """
 
     _THUMB_SIZE: int = 110
-    _MAX_THUMBS: int = 5
     _BORDER_IDLE: str = "#555555"
     _BORDER_ACTIVE: str = "#1E88E5"
 
@@ -884,7 +884,9 @@ class _ImagesWindow(tk.Toplevel):
             ).grid(row=0, column=0, sticky="w")
             return
 
-        for index, img in enumerate(self._images[: self._MAX_THUMBS]):
+        # Показываем все привязанные снимки (серия ограничена 5 при захвате,
+        # но БД числа не ограничивает — не срезаем, чтобы ничего не пропало).
+        for index, img in enumerate(self._images):
             self._add_thumbnail(index, img)
         self._highlight_selected()
 

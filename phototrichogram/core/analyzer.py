@@ -24,6 +24,7 @@ from phototrichogram.core.measurement import (
     measure_all,
     split_thick_bundles,
 )
+from phototrichogram.core.roots import classify_rooting
 from phototrichogram.core.segmentation import find_hair_contours, segment_hair
 from phototrichogram.core.stats import (
     HairRatios,
@@ -50,9 +51,12 @@ _COLOR_VELLUS = (0, 0, 255)         # Красный
 _COLOR_INTERMEDIATE = (0, 165, 255)  # Оранжевый
 _COLOR_BUNDLE = (255, 0, 255)        # Пурпурный — слипшийся пучок (исключён)
 _COLOR_BUNDLE_RGB = (255, 0, 255)    # Пурпурный (RGB для PIL, совпадает с BGR)
+_COLOR_TRANSIT = (150, 150, 150)     # Серый — транзитный волос (исключён в rooted)
+_COLOR_TRANSIT_RGB = (150, 150, 150)  # Серый (RGB для PIL, совпадает с BGR)
 _COLOR_TEXT = (0, 255, 255)          # Жёлтый (BGR)
 _COLOR_TEXT_RGB = (255, 255, 0)      # Жёлтый (RGB для PIL)
 _CONTOUR_THICKNESS = 2
+_TRANSIT_THICKNESS = 1               # Тонкая обводка транзитных (визуально «бледнее»)
 
 # Шрифты для русского текста через PIL: сначала шрифты из пакета
 # (assets/fonts/ — попадают в сборку PyInstaller), затем системные.
@@ -206,6 +210,7 @@ def _annotate_image(
     density: float,
     ratios: HairRatios,
     bundles: list[HairMeasurement] | None = None,
+    transit: list[HairMeasurement] | None = None,
 ) -> NDArray[np.uint8]:
     """Аннотация снимка -- контуры волос и информационная панель.
 
@@ -215,6 +220,8 @@ def _annotate_image(
     - Красный = Vellus (<30 мкм)
     - Пурпурный = слипшийся пучок (толще max_hair_thickness_um, исключён
       из подсчёта — обводится, чтобы оператор видел, что было отброшено)
+    - Серый (тонкий) = транзитный волос (режим count_mode='rooted': проходит
+      через кадр насквозь, корня в кадре нет, исключён из подсчёта)
 
     Текст рендерится через PIL (ImageFont) для поддержки кириллицы.
     cv2.putText не поддерживает Unicode и показывает '??????' для русских букв.
@@ -226,12 +233,17 @@ def _annotate_image(
         ratios: Соотношения типов.
         bundles: Отброшенные слипшиеся пучки (толще порога). Обводятся особым
             цветом и в подсчёт не входят. None или пустой список — пучков нет.
+        transit: Транзитные волосы, исключённые в режиме 'rooted' (проходят
+            через кадр). Обводятся серым тонким контуром. None/пустой список —
+            транзитных нет (в режиме 'all' список всегда пуст → разметка как
+            прежде).
 
     Returns:
         Копия изображения с нанесённой разметкой.
     """
     annotated = image.copy()
     bundles = bundles or []
+    transit = transit or []
 
     # Рисуем контуры каждого волоса (OpenCV — работает без текста)
     for m in measurements:
@@ -259,6 +271,13 @@ def _annotate_image(
             cv2.FONT_HERSHEY_SIMPLEX, 0.4, _COLOR_BUNDLE, 1,
         )
 
+    # Транзитные волосы (режим 'rooted') — тонкий серый контур без подписи.
+    # Исключены из подсчёта, но показываются, чтобы оператор видел, что именно
+    # отброшено как «прохожие» волосы. В режиме 'all' список пуст → ничего не
+    # рисуется (разметка полностью совпадает с прежней).
+    for t in transit:
+        cv2.drawContours(annotated, [t.contour], -1, _COLOR_TRANSIT, _TRANSIT_THICKNESS)
+
     # Масштаб шрифта относительно размера изображения
     h, w = annotated.shape[:2]
     font_size = max(12, min(h, w) // 40)
@@ -276,6 +295,9 @@ def _annotate_image(
     # Отдельной строкой — сколько слипшихся пучков исключено из подсчёта
     if bundles:
         info_lines.append(f"Пучки искл.: {len(bundles)}")
+    # И сколько транзитных волос исключено в режиме 'rooted'
+    if transit:
+        info_lines.append(f"Транзит искл.: {len(transit)}")
 
     # Фон для текста
     panel_h = line_height * len(info_lines) + 10
@@ -299,6 +321,9 @@ def _annotate_image(
     # Пучки в легенде — только если они есть на снимке
     if bundles:
         legend_items.append(("Пучок (искл.)", _COLOR_BUNDLE, _COLOR_BUNDLE_RGB))
+    # Транзитные — только в режиме 'rooted', когда они есть
+    if transit:
+        legend_items.append(("Транзит (искл.)", _COLOR_TRANSIT, _COLOR_TRANSIT_RGB))
     legend_font = max(10, font_size - 2)
     ly = h - 20
     for label, color_bgr, color_rgb in reversed(legend_items):
@@ -409,7 +434,26 @@ class Analyzer:
                 config.max_hair_thickness_um,
             )
 
-        # 4. Классификация (только реальные волосы, без пучков)
+        # 3b. Режим подсчёта «от корней» (count_mode="rooted"): исключаем
+        # транзитные волосы — те, что проходят через кадр насквозь (оба конца у
+        # границы, корня в кадре нет). По аналогии со слипшимися пучками они
+        # исключаются из счёта, плотности, соотношений и статистики толщин.
+        # При count_mode="all" (дефолт) фильтр НЕ применяется — поведение
+        # полностью идентично прежнему, transit остаётся пустым.
+        transit: list[HairMeasurement] = []
+        if config.count_mode == "rooted":
+            measurements, transit = classify_rooting(
+                measurements, (image.shape[0], image.shape[1]), config
+            )
+            if transit:
+                logger.info(
+                    "Режим 'от корней': исключено %d транзитных волос "
+                    "(проходят через кадр, корня в кадре нет)",
+                    len(transit),
+                )
+
+        # 4. Классификация (только реальные волосы: без пучков и, в режиме
+        # 'rooted', без транзитных)
         classify_all(measurements, config)
 
         # 5. Статистика — площадь FOV по реальным размерам изображения
@@ -422,7 +466,9 @@ class Analyzer:
         # 6. Аннотация (опционально)
         annotated: NDArray[np.uint8] | None = None
         if annotate:
-            annotated = _annotate_image(image, measurements, density, ratios, bundles)
+            annotated = _annotate_image(
+                image, measurements, density, ratios, bundles, transit
+            )
 
         result = AnalysisResult(
             measurements=measurements,

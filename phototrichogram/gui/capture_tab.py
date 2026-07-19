@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from phototrichogram.core.analyzer import AnalysisResult
     from phototrichogram.core.camera import Camera, DeviceInfo
     from phototrichogram.gui.app import App
+    from phototrichogram.gui.series import ZoneSeriesResult
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +65,22 @@ _COLOR_ANALYZING = "#FF9800"  # оранжевый — анализ
 class _ZoneCard(ttk.LabelFrame):
     """Карточка одной зоны скальпа.
 
+    Хранит серию до :data:`_MAX_SERIES` снимков зоны. «Снимок»/«Загрузить»
+    ДОБАВЛЯЮТ кадр в серию (пока не заполнена), «Очистить» чистит всю серию.
+    Итоговые метрики зоны считаются как среднее по серии (см. gui.series).
+
     Содержит:
-    - Миниатюру загруженного снимка (или placeholder)
+    - Миниатюру последнего снимка серии (или placeholder)
+    - Счётчик «N/5» в индикаторе статуса
     - Кнопки: Загрузить, Снимок (с камеры), Очистить
     - Цветной индикатор статуса
     """
 
     # Размер миниатюры
     _THUMB_SIZE = 120
+
+    # Максимум снимков в серии на зону (план v1.4: до 5 контрольных кадров)
+    _MAX_SERIES = 5
 
     def __init__(
         self,
@@ -93,7 +102,8 @@ class _ZoneCard(ttk.LabelFrame):
 
         self._zone_code = zone_code
         self._on_preview_click = on_preview_click
-        self._image: np.ndarray[Any, Any] | None = None
+        # Серия снимков зоны (BGR numpy). Пусто → зона не снята.
+        self._images: list[np.ndarray[Any, Any]] = []
         self._photo_thumb: object | None = None  # ImageTk.PhotoImage reference
 
         self._create_widgets()
@@ -104,14 +114,24 @@ class _ZoneCard(ttk.LabelFrame):
         return self._zone_code
 
     @property
-    def image(self) -> np.ndarray[Any, Any] | None:
-        """Загруженное изображение (BGR numpy array) или None."""
-        return self._image
+    def images(self) -> list[np.ndarray[Any, Any]]:
+        """Серия снимков зоны (копия списка, BGR numpy array'и)."""
+        return list(self._images)
+
+    @property
+    def snapshot_count(self) -> int:
+        """Число снимков в серии зоны."""
+        return len(self._images)
+
+    @property
+    def is_full(self) -> bool:
+        """Заполнена ли серия (достигнут максимум снимков)."""
+        return len(self._images) >= self._MAX_SERIES
 
     @property
     def has_image(self) -> bool:
-        """Загружено ли изображение."""
-        return self._image is not None
+        """Есть ли хотя бы один снимок в серии."""
+        return len(self._images) > 0
 
     def _create_widgets(self) -> None:
         """Создание виджетов карточки."""
@@ -166,20 +186,21 @@ class _ZoneCard(ttk.LabelFrame):
             btn_frame, text="Загрузить", command=self._on_load, width=10,
         )
         self._load_btn.grid(row=0, column=0, padx=1, sticky="ew")
-        ToolTip(self._load_btn, "Загрузить снимок из файла")
+        ToolTip(self._load_btn, "Добавить снимок из файла в серию (до 5)")
 
         self._capture_btn = ttk.Button(
             btn_frame, text="Снимок", command=self._on_capture,
             state="disabled", width=10,
         )
         self._capture_btn.grid(row=0, column=1, padx=1, sticky="ew")
-        ToolTip(self._capture_btn, "Сделать снимок с камеры")
+        ToolTip(self._capture_btn, "Добавить снимок с камеры в серию (до 5)")
 
         self._clear_btn = ttk.Button(
             btn_frame, text="Очистить", command=self._on_clear,
             state="disabled", width=10,
         )
         self._clear_btn.grid(row=1, column=0, columnspan=2, pady=(2, 0), sticky="ew")
+        ToolTip(self._clear_btn, "Очистить всю серию снимков зоны")
 
         # Callback'и, которые установит CaptureTab
         self._load_callback: Callable[[str], None] | None = None
@@ -207,20 +228,30 @@ class _ZoneCard(ttk.LabelFrame):
         """
         self._capture_btn.config(state="normal" if available else "disabled")
 
-    def set_image(self, image: np.ndarray[Any, Any]) -> None:
-        """Установить изображение зоны и обновить миниатюру.
+    def add_image(self, image: np.ndarray[Any, Any]) -> bool:
+        """Добавить снимок в серию зоны и обновить миниатюру.
+
+        Снимок добавляется в конец серии, миниатюрой становится последний
+        кадр. Если серия уже заполнена (:attr:`is_full`) — снимок НЕ
+        добавляется.
 
         Args:
             image: BGR numpy array.
-        """
-        self._image = image.copy()
-        self._update_thumbnail()
-        self._update_status(loaded=True)
-        self._clear_btn.config(state="normal")
 
-    def clear_image(self) -> None:
-        """Очистить изображение зоны."""
-        self._image = None
+        Returns:
+            True если снимок добавлен, False если серия уже заполнена.
+        """
+        if self.is_full:
+            return False
+        self._images.append(image.copy())
+        self._update_thumbnail()
+        self._update_status()
+        self._clear_btn.config(state="normal")
+        return True
+
+    def clear_series(self) -> None:
+        """Очистить всю серию снимков зоны."""
+        self._images.clear()
         self._photo_thumb = None
         self._thumb_canvas.delete("all")
         self._placeholder_id = self._thumb_canvas.create_text(
@@ -230,12 +261,12 @@ class _ZoneCard(ttk.LabelFrame):
             fill="#888888",
             font=("", 20),
         )
-        self._update_status(loaded=False)
+        self._update_status()
         self._clear_btn.config(state="disabled")
 
     def _update_thumbnail(self) -> None:
-        """Обновить миниатюру из текущего изображения."""
-        if self._image is None:
+        """Обновить миниатюру из последнего снимка серии."""
+        if not self._images:
             return
 
         try:
@@ -243,7 +274,7 @@ class _ZoneCard(ttk.LabelFrame):
 
             from phototrichogram.utils.image_utils import numpy_to_pil, resize_to_fit_pil
 
-            pil_image = numpy_to_pil(self._image)
+            pil_image = numpy_to_pil(self._images[-1])
             thumb = resize_to_fit_pil(pil_image, self._THUMB_SIZE, self._THUMB_SIZE)
             self._photo_thumb = ImageTk.PhotoImage(thumb)
 
@@ -257,15 +288,14 @@ class _ZoneCard(ttk.LabelFrame):
         except Exception as e:
             logger.error("Ошибка создания миниатюры для зоны %s: %s", self._zone_code, e)
 
-    def _update_status(self, loaded: bool) -> None:
-        """Обновить индикатор статуса.
-
-        Args:
-            loaded: True если снимок загружен.
-        """
-        if loaded:
+    def _update_status(self) -> None:
+        """Обновить индикатор статуса — счётчик «N/max» снимков серии."""
+        count = len(self._images)
+        if count > 0:
             self._status_canvas.itemconfig(self._status_dot, fill=_COLOR_LOADED)
-            self._status_label.config(text="Загружено", foreground=_COLOR_LOADED)
+            self._status_label.config(
+                text=f"{count}/{self._MAX_SERIES}", foreground=_COLOR_LOADED,
+            )
         else:
             self._status_canvas.itemconfig(self._status_dot, fill=_COLOR_EMPTY)
             self._status_label.config(text="--", foreground=_COLOR_EMPTY)
@@ -281,13 +311,13 @@ class _ZoneCard(ttk.LabelFrame):
             self._capture_callback(self._zone_code)
 
     def _on_clear(self) -> None:
-        """Очистить снимок зоны."""
-        self.clear_image()
+        """Очистить всю серию снимков зоны."""
+        self.clear_series()
 
     def _on_thumb_click(self, event: tk.Event) -> None:
-        """Клик по миниатюре — показать в большом превью."""
-        if self._image is not None:
-            self._on_preview_click(self._zone_code, self._image)
+        """Клик по миниатюре — показать последний снимок серии в большом превью."""
+        if self._images:
+            self._on_preview_click(self._zone_code, self._images[-1])
 
 
 class CaptureTab(ttk.Frame):
@@ -613,17 +643,25 @@ class CaptureTab(ttk.Frame):
         Args:
             zone_code: Код зоны (F/P/T/O).
         """
+        card = self._zone_cards[zone_code]
+        if card.is_full:
+            self._app.status_bar.set_text(
+                f"Зона {zone_code}: серия заполнена ({card.snapshot_count}/5)",
+            )
+            return
+
         dialog = ImageFileDialog(self, title=f"Загрузить снимок — {_ZONE_INFO[zone_code]['name']}")
         path = dialog.show()
         if path is not None:
             from phototrichogram.utils.image_utils import load_image
             image = load_image(path)
             if image is not None:
-                self._zone_cards[zone_code].set_image(image)
+                card.add_image(image)
                 self._image_canvas.show_numpy(image)
                 self._update_zones_status()
                 self._app.status_bar.set_ready(
-                    f"Зона {zone_code}: загружен {Path(path).name}",
+                    f"Зона {zone_code}: добавлен {Path(path).name} "
+                    f"(снимков: {card.snapshot_count}/5)",
                 )
             else:
                 self._app.status_bar.set_error(f"Не удалось загрузить: {path}")
@@ -634,12 +672,19 @@ class CaptureTab(ttk.Frame):
         Args:
             zone_code: Код зоны (F/P/T/O).
         """
+        card = self._zone_cards[zone_code]
+        if card.is_full:
+            self._app.status_bar.set_text(
+                f"Зона {zone_code}: серия заполнена ({card.snapshot_count}/5)",
+            )
+            return
+
         if self._current_frame is None:
             self._app.status_bar.set_text("Нет кадра для снимка")
             return
 
         frame_copy = np.copy(self._current_frame)
-        self._zone_cards[zone_code].set_image(frame_copy)
+        card.add_image(frame_copy)
         self._update_zones_status()
 
         # Автосохранение если включено
@@ -647,9 +692,12 @@ class CaptureTab(ttk.Frame):
             self._autosave_snapshot(frame_copy, zone_code)
 
         self._app.status_bar.set_ready(
-            f"Зона {zone_code}: снимок сделан",
+            f"Зона {zone_code}: снимок добавлен (снимков: {card.snapshot_count}/5)",
         )
-        logger.info("Снимок для зоны %s сделан", zone_code)
+        logger.info(
+            "Снимок для зоны %s добавлен (серия: %d/5)",
+            zone_code, card.snapshot_count,
+        )
 
     def _on_zone_preview(self, zone_code: str, image: np.ndarray[Any, Any]) -> None:
         """Показать снимок зоны в большом превью.
@@ -677,21 +725,25 @@ class CaptureTab(ttk.Frame):
         # (пользователь должен явно нажать кнопку «Снимок» на карточке)
 
     def _update_zones_status(self) -> None:
-        """Обновить строку статуса зон и доступность кнопки анализа."""
+        """Обновить строку статуса зон и доступность кнопки анализа.
+
+        Показывает число снимков в серии каждой зоны («F: 3/5»), либо «--»
+        для пустой зоны.
+        """
         parts: list[str] = []
         loaded_count = 0
 
         for zone_code in ["F", "P", "T", "O"]:
             card = self._zone_cards[zone_code]
             if card.has_image:
-                parts.append(f"{zone_code}: \u2713")
+                parts.append(f"{zone_code}: {card.snapshot_count}/5")
                 loaded_count += 1
             else:
                 parts.append(f"{zone_code}: --")
 
         self._zones_status_var.set("  ".join(parts))
 
-        # Кнопка анализа доступна если хотя бы 1 зона загружена
+        # Кнопка анализа доступна если хотя бы 1 зона имеет снимки
         if loaded_count > 0:
             self._analyze_btn.config(state="normal")
         else:
@@ -721,15 +773,16 @@ class CaptureTab(ttk.Frame):
     # ──────────────────────────── Мультизональный анализ ──────────────────────
 
     def _on_analyze_all(self) -> None:
-        """Запуск анализа всех загруженных зон в отдельном потоке."""
-        # Собрать загруженные зоны
-        zone_images: dict[str, np.ndarray[Any, Any]] = {}
+        """Запуск анализа всех зон с непустой серией в отдельном потоке."""
+        # Собрать серии снимков по зонам (копии — анализ идёт в фоне, пока
+        # пользователь может очистить/дополнить карточку).
+        zone_series: dict[str, list[np.ndarray[Any, Any]]] = {}
         for zone_code, card in self._zone_cards.items():
-            image = card.image
-            if image is not None:
-                zone_images[zone_code] = image.copy()
+            images = card.images
+            if images:
+                zone_series[zone_code] = [np.copy(img) for img in images]
 
-        if not zone_images:
+        if not zone_series:
             self._app.status_bar.set_text("Нет загруженных снимков для анализа")
             return
 
@@ -752,22 +805,36 @@ class CaptureTab(ttk.Frame):
         self._progress.pack(side="right", padx=5)
         self._progress.start(10)
         self._app.status_bar.set_busy(
-            f"Анализ {len(zone_images)} зон...",
+            f"Анализ {len(zone_series)} зон...",
         )
 
         def do_analysis() -> None:
-            """Анализ всех зон в отдельном потоке."""
+            """Анализ всех зон в отдельном потоке.
+
+            Для каждой зоны прогоняется анализ КАЖДОГО снимка серии, затем
+            метрики усредняются (gui.series.aggregate_series). Снимки, которые
+            анализатор отверг (вернул None), пропускаются; зона без единого
+            валидного результата в итог не попадает.
+            """
             try:
                 from phototrichogram.core.analyzer import Analyzer
+                from phototrichogram.gui.series import aggregate_series
 
                 analyzer = Analyzer(self._app.config.analysis)
-                results: dict[str, AnalysisResult] = {}
+                results: dict[str, ZoneSeriesResult] = {}
 
-                for zone_code, image in zone_images.items():
-                    logger.info("Анализ зоны %s...", zone_code)
-                    result = analyzer.analyze_with_annotation(image)
-                    if result is not None:
-                        results[zone_code] = result
+                for zone_code, images in zone_series.items():
+                    logger.info(
+                        "Анализ зоны %s (снимков: %d)...", zone_code, len(images),
+                    )
+                    per_snapshot: list[AnalysisResult] = []
+                    for img in images:
+                        result = analyzer.analyze_with_annotation(img)
+                        if result is not None:
+                            per_snapshot.append(result)
+
+                    if per_snapshot:
+                        results[zone_code] = aggregate_series(per_snapshot)
 
                 self.after(0, lambda: self._on_analysis_complete(results))
             except Exception as e:
@@ -777,11 +844,12 @@ class CaptureTab(ttk.Frame):
 
         threading.Thread(target=do_analysis, daemon=True).start()
 
-    def _on_analysis_complete(self, results: dict[str, AnalysisResult]) -> None:
+    def _on_analysis_complete(self, results: dict[str, ZoneSeriesResult]) -> None:
         """Обработка завершения мультизонального анализа.
 
         Args:
-            results: Словарь {код_зоны: AnalysisResult}.
+            results: Словарь {код_зоны: ZoneSeriesResult} — усреднённые по
+                серии метрики зоны + число снимков и разброс плотности.
         """
         self._progress.stop()
         self._progress.pack_forget()
@@ -801,14 +869,16 @@ class CaptureTab(ttk.Frame):
             f"Анализ завершён: {len(results)} зон обработано",
         )
 
-    def _save_results_to_db(self, results: dict[str, AnalysisResult]) -> None:
+    def _save_results_to_db(self, results: dict[str, ZoneSeriesResult]) -> None:
         """Сохранить результаты анализа в базу данных.
 
         Создаёт калибровку, сессию и измерения для активного пациента.
         Если пациент не выбран — показывает предупреждение в статусбаре.
+        В каждое измерение пишутся усреднённые по серии метрики плюс
+        n_snapshots (число снимков) и density_std (разброс плотности).
 
         Args:
-            results: Словарь {код_зоны: AnalysisResult}.
+            results: Словарь {код_зоны: ZoneSeriesResult}.
         """
         patient = self._app.active_patient
         if patient is None:
@@ -833,7 +903,8 @@ class CaptureTab(ttk.Frame):
             today = datetime.now().strftime("%Y-%m-%d")
             measurements_data: list[dict[str, Any]] = []
 
-            for zone_code, result in results.items():
+            for zone_code, zone_result in results.items():
+                result = zone_result.result
                 meas_dict = {
                     "zone": zone_code,
                     "hair_count": result.hair_count,
@@ -851,6 +922,10 @@ class CaptureTab(ttk.Frame):
                     "intermediate_pct": result.ratios.intermediate_pct,
                     "tv_ratio": result.ratios.tv_ratio,
                     "fov_area_mm2": result.fov_area_mm2,
+                    # Серия снимков (план v1.4): число усреднённых кадров и
+                    # разброс плотности (None для одиночного снимка).
+                    "n_snapshots": zone_result.n_snapshots,
+                    "density_std": zone_result.density_std,
                 }
                 measurements_data.append(meas_dict)
 

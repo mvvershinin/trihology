@@ -49,6 +49,12 @@ class AnalysisConfig:
         max_hair_thickness_um: Максимальная физически возможная толщина одного
             волоса (мкм). Контуры толще — слипшиеся пучки, исключаются из подсчёта.
         threshold_method: Метод бинаризации ('otsu' | 'adaptive').
+        count_mode: Режим подсчёта волос ('all' — все контуры, дефолт, текущее
+            поведение; 'rooted' — только «растущие» волосы с корнем в кадре,
+            транзитные исключаются). См. core/roots.py.
+        root_border_margin_px: Отступ от края кадра (px) для детекции «корня»:
+            конец контура дальше этого отступа от всех четырёх краёв считается
+            лежащим внутри кадра. Применяется только при count_mode='rooted'.
     """
 
     # Калибровка
@@ -97,6 +103,23 @@ class AnalysisConfig:
     # Метод порогового разделения
     threshold_method: str = "otsu"
 
+    # Режим подсчёта волос:
+    #   "all"    — считаются все обнаруженные контуры (ТЕКУЩЕЕ поведение, ДЕФОЛТ);
+    #   "rooted" — считаются только «растущие» волосы, у которых хотя бы один
+    #              конец лежит внутри кадра (детекция в core/roots.py). Транзитные
+    #              волосы (проходят через кадр насквозь, оба конца упираются в
+    #              границу — растут вне участка) исключаются из счёта, плотности,
+    #              соотношений и статистики толщин.
+    # ВАЖНО: дефолт "all" полностью сохраняет прежнее поведение. "rooted" —
+    # опциональный режим для сравнения; переключается в настройках анализа.
+    count_mode: str = "all"
+
+    # Отступ от края кадра (px): конец контура ближе этого расстояния к любому
+    # из четырёх краёв считается «упирающимся в границу» (волос уходит за кадр).
+    # Дальше отступа от всех краёв — конец лежит внутри кадра («корень»).
+    # Используется только при count_mode="rooted".
+    root_border_margin_px: int = 6
+
     @property
     def vellus_threshold_px(self) -> float:
         """Порог Vellus в пикселях (пересчёт из мкм по калибровке)."""
@@ -135,6 +158,10 @@ class CameraConfig:
 
     Attributes:
         device_index: Индекс устройства V4L2 (/dev/videoN).
+        device_name: Имя последнего выбранного устройства или None. Индексы
+            /dev/videoN могут меняться между перезагрузками, поэтому для
+            восстановления выбора устройство ищется сначала по имени, затем
+            по индексу.
         width: Запрашиваемая ширина кадра.
         height: Запрашиваемая высота кадра.
         fps: Запрашиваемая частота кадров.
@@ -143,6 +170,7 @@ class CameraConfig:
     """
 
     device_index: int = 0
+    device_name: str | None = None
     width: int = 640
     height: int = 480
     fps: int = 30
@@ -233,6 +261,16 @@ def _dict_to_config(data: dict[str, Any]) -> Config:
     analysis_kwargs = {k: v for k, v in analysis_data.items() if k in analysis_fields}
     camera_kwargs = {k: v for k, v in camera_data.items() if k in camera_fields}
     app_kwargs = {k: v for k, v in app_data.items() if k in app_fields}
+
+    # Валидация count_mode: неизвестное значение (опечатка в конфиге) молча
+    # трактовалось бы анализатором как "all" — вместо этого явно откатываем и
+    # предупреждаем, чтобы поведение было предсказуемым.
+    count_mode = analysis_kwargs.get("count_mode")
+    if count_mode is not None and count_mode not in ("all", "rooted"):
+        logger.warning(
+            "Неизвестный count_mode=%r в конфиге, используется 'all'", count_mode
+        )
+        analysis_kwargs["count_mode"] = "all"
 
     return Config(
         analysis=AnalysisConfig(**analysis_kwargs),

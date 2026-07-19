@@ -8,7 +8,8 @@
 НЕ содержит диагнозов, названий болезней, рекомендаций.
 Приложение — измерительный инструмент, не диагност.
 
-Принимает dict[str, AnalysisResult] из capture_tab.
+Принимает dict[str, ZoneSeriesResult] из capture_tab (усреднённый по серии
+снимков результат зоны + число снимков и разброс плотности).
 НЕ импортирует cv2. Использует core.analyzer и core.stats.
 """
 
@@ -26,12 +27,18 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from phototrichogram.core.norms import NormStatus
-from phototrichogram.gui.widgets import ToolTip, format_tv_ratio, patient_norms
+from phototrichogram.gui.widgets import (
+    ToolTip,
+    format_density,
+    format_tv_ratio,
+    patient_norms,
+)
 
 if TYPE_CHECKING:
     from phototrichogram.core.analyzer import AnalysisResult
     from phototrichogram.core.norms import PatientNorms
     from phototrichogram.gui.app import App
+    from phototrichogram.gui.series import ZoneSeriesResult
 
 logger = logging.getLogger(__name__)
 
@@ -208,17 +215,24 @@ class _ZoneResultCard(ttk.Frame):
         tv_ratio: float,
         density_diff_pct: float | None = None,
         status: str = "neutral",
+        density_std: float | None = None,
+        n_snapshots: int = 1,
     ) -> None:
         """Обновить данные карточки.
 
         Args:
-            density: Плотность волос/см².
+            density: Плотность волос/см² (среднее по серии).
             vellus_pct: Процент пушковых волос.
             tv_ratio: Соотношение T/V.
             density_diff_pct: Разница с контролем в % (None для зоны O).
             status: Статус ('good', 'warning', 'bad', 'neutral').
+            density_std: Разброс плотности по серии (None для одиночного снимка).
+            n_snapshots: Число снимков в серии (1 — одиночный). При >1 карточка
+                показывает плотность с разбросом «250 ± 30/см²».
         """
-        self._vars["density"].set(f"{density:.0f}/см\u00B2")
+        # Компактно на карточке — «250 ± 30/см²» без «(N снимков)»: знак «±» уже
+        # сигнализирует серию, а число снимков видно в деталях зоны.
+        self._vars["density"].set(format_density(density, density_std, n_snapshots))
         self._vars["vellus"].set(f"{vellus_pct:.0f}%")
         self._vars["tv_ratio"].set(format_tv_ratio(tv_ratio))
 
@@ -260,7 +274,11 @@ class MultizoneTab(ttk.Frame):
         """
         super().__init__(parent, **kwargs)
         self._app = app
+        # Усреднённые AnalysisResult по зонам (для карточек, графиков, деталей).
         self._zone_results: dict[str, AnalysisResult] = {}
+        # Метаданные серии по зонам (n_snapshots, density_std) — источник для
+        # показа разброса плотности. Ключи совпадают с _zone_results.
+        self._zone_series: dict[str, ZoneSeriesResult] = {}
         self._zone_cards: dict[str, _ZoneResultCard] = {}
 
         self._create_widgets()
@@ -526,7 +544,7 @@ class MultizoneTab(ttk.Frame):
 
     # ──────────────────────────── Публичный API ───────────────────────────────
 
-    def load_results(self, zone_results: dict[str, AnalysisResult]) -> None:
+    def load_results(self, zone_results: dict[str, ZoneSeriesResult]) -> None:
         """Загрузить результаты мультизонального анализа.
 
         Обновляет справочный блок норм, карточки зон, графики и сбрасывает
@@ -534,10 +552,17 @@ class MultizoneTab(ttk.Frame):
         персональных норм активного пациента (единый источник — core.norms).
         Показывает только метрики без диагнозов и рекомендаций.
 
+        Каждая зона приходит как ``ZoneSeriesResult`` (усреднённый по серии
+        снимков результат + число снимков и разброс плотности). Внутри карточки,
+        графики и детали продолжают работать с ``AnalysisResult`` из
+        ``.result``; метаданные серии хранятся отдельно (``_zone_series``) и
+        используются для показа разброса плотности.
+
         Args:
-            zone_results: Словарь {код_зоны: AnalysisResult}.
+            zone_results: Словарь {код_зоны: ZoneSeriesResult}.
         """
-        self._zone_results = zone_results
+        self._zone_series = zone_results
+        self._zone_results = {z: zsr.result for z, zsr in zone_results.items()}
 
         # Единый источник норм на весь вызов: справочный блок, раскраска
         # карточек и линии норм на графике используют один PatientNorms.
@@ -547,8 +572,8 @@ class MultizoneTab(ttk.Frame):
         # Обновить карточки зон (раскраска по персональным нормам)
         self._refresh_zone_cards(norms)
 
-        # Обновить график
-        self._draw_comparison_chart(zone_results, norms)
+        # Обновить график (по усреднённым AnalysisResult)
+        self._draw_comparison_chart(self._zone_results, norms)
 
         # Очистить детали
         self._set_text_widget(
@@ -609,12 +634,17 @@ class MultizoneTab(ttk.Frame):
                 if zone_code == "O":
                     status = "neutral"
 
+                # Метаданные серии зоны (число снимков, разброс плотности) —
+                # для показа «250 ± 30/см²» на карточке при серии из >1 снимка.
+                series = self._zone_series.get(zone_code)
                 card.update_data(
                     density=r.density_per_cm2,
                     vellus_pct=r.ratios.vellus_pct,
                     tv_ratio=r.ratios.tv_ratio,
                     density_diff_pct=diff,
                     status=status,
+                    density_std=series.density_std if series is not None else None,
+                    n_snapshots=series.n_snapshots if series is not None else 1,
                 )
             else:
                 card.clear_data()
@@ -678,11 +708,19 @@ class MultizoneTab(ttk.Frame):
         t = r.thickness
         ratios = r.ratios
 
+        # Плотность зоны с разбросом по серии: «250 ± 30/см² (5 снимков)».
+        series = self._zone_series.get(zone_code)
+        n_snap = series.n_snapshots if series is not None else 1
+        dens_std = series.density_std if series is not None else None
+        density_text = format_density(
+            r.density_per_cm2, dens_std, n_snap, with_count=True,
+        )
+
         info_lines = [
             f"Зона {zone_code} — {_ZONE_NAMES.get(zone_code, '')}",
             "",
             f"Волос: {r.hair_count}",
-            f"Плотность: {r.density_per_cm2:.0f}/см\u00B2",
+            f"Плотность: {density_text}",
             "",
             f"Terminal: {ratios.terminal_count} ({ratios.terminal_pct:.0f}%)",
             f"Vellus: {ratios.vellus_count} ({ratios.vellus_pct:.0f}%)",

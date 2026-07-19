@@ -150,7 +150,39 @@ _MIGRATIONS: list[tuple[int, str]] = [
         9,
         "ALTER TABLE patients ADD COLUMN ethnicity TEXT",
     ),
+    (
+        10,
+        """
+        ALTER TABLE measurements ADD COLUMN n_snapshots INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE measurements ADD COLUMN density_std  REAL
+        """,
+    ),
 ]
+
+
+def _split_statements(sql: str) -> list[str]:
+    """Разбивает текст миграции на отдельные SQL-инструкции по ';'.
+
+    ``sqlite3.Connection.execute()`` выполняет только одну инструкцию за
+    вызов, а SQLite не умеет добавлять несколько колонок одним
+    ``ALTER TABLE`` — поэтому одна версия миграции иногда содержит
+    несколько DDL-операторов подряд (например, два ``ADD COLUMN`` в v10).
+    Пустые/пробельные фрагменты (в т.ч. из-за отступов многострочных
+    строк) отбрасываются.
+
+    ВНИМАНИЕ: разбиение наивное — по каждому ';'. Поэтому SQL миграций НЕ
+    должен содержать ';' внутри строковых литералов (например, в DEFAULT) или
+    в теле ``CREATE TRIGGER ... BEGIN ...; ... END`` — иначе оператор
+    порежется на невалидные части. Для таких миграций храните SQL как список
+    отдельных инструкций, а не одну строку через ';'.
+
+    Args:
+        sql: Текст миграции — одна или несколько инструкций через ';'.
+
+    Returns:
+        Список непустых SQL-инструкций без начальных/конечных пробелов.
+    """
+    return [part.strip() for part in sql.split(";") if part.strip()]
 
 
 def _now() -> str:
@@ -261,8 +293,19 @@ class Database:
                 # иначе при падении процесса между ними неидемпотентная миграция
                 # (ADD COLUMN) повторится при следующем старте и упадёт с
                 # "duplicate column", ломая открытие БД.
+                # BEGIN — явно: sqlite3 (legacy-режим транзакций, действующий по
+                # умолчанию) не открывает неявную транзакцию перед DDL (ALTER
+                # TABLE/CREATE TABLE), в отличие от INSERT/UPDATE/DELETE —
+                # без явного BEGIN каждый execute() автокоммитится сам по себе,
+                # и `with conn:` не сможет откатить DDL при ошибке. Один SQL
+                # миграции может содержать несколько инструкций подряд
+                # (например, два ALTER TABLE ADD COLUMN в v10) — execute()
+                # выполняет только одну за вызов, поэтому текст режется на
+                # части в _split_statements().
                 with conn:
-                    conn.execute(sql)
+                    conn.execute("BEGIN")
+                    for statement in _split_statements(sql):
+                        conn.execute(statement)
                     conn.execute(f"PRAGMA user_version={int(version)}")
             except sqlite3.Error as exc:
                 logger.error("Ошибка миграции v%d: %s", version, exc)
@@ -338,6 +381,8 @@ class Database:
             annotated_image_path=row["annotated_image_path"],
             assessment=row["assessment"],
             created_at=row["created_at"],
+            n_snapshots=row["n_snapshots"],
+            density_std=row["density_std"],
         )
 
     # ── CRUD: Patient ─────────────────────────────────────────────────────────
@@ -875,6 +920,8 @@ class Database:
         image_path: str | None = None,
         annotated_image_path: str | None = None,
         assessment: str | None = None,
+        n_snapshots: int = 1,
+        density_std: float | None = None,
     ) -> Measurement:
         """Сохранение результата анализа снимка.
 
@@ -902,6 +949,11 @@ class Database:
             image_path: Путь к исходному снимку или None.
             annotated_image_path: Путь к аннотированному снимку или None.
             assessment: Диагностическая оценка или None.
+            n_snapshots: Количество снимков зоны, усреднённых в это
+                измерение. По умолчанию 1 — одиночный снимок (прежнее
+                поведение, обратная совместимость со старыми вызовами).
+            density_std: Стандартное отклонение плотности по серии снимков
+                или None, если серия не усреднялась (n_snapshots == 1).
 
         Returns:
             Объект Measurement с заполненным id.
@@ -925,7 +977,8 @@ class Database:
                         terminal_pct, vellus_pct, intermediate_pct, tv_ratio,
                         fov_area_mm2,
                         image_path, annotated_image_path,
-                        assessment, created_at
+                        assessment, created_at,
+                        n_snapshots, density_std
                     ) VALUES (
                         ?, ?,
                         ?, ?,
@@ -934,6 +987,7 @@ class Database:
                         ?, ?, ?,
                         ?, ?, ?, ?,
                         ?,
+                        ?, ?,
                         ?, ?,
                         ?, ?
                     )
@@ -948,6 +1002,7 @@ class Database:
                         fov_area_mm2,
                         image_path, annotated_image_path,
                         assessment, now,
+                        n_snapshots, density_std,
                     ),
                 )
                 meas_id = cursor.lastrowid
@@ -986,11 +1041,13 @@ class Database:
             annotated_image_path=annotated_image_path,
             assessment=assessment,
             created_at=now,
+            n_snapshots=n_snapshots,
+            density_std=density_std,
         )
         logger.info(
             "Сохранено измерение id=%d: сессия=%d, зона=%s, "
-            "%d волос, плотность=%.0f/см²",
-            meas_id, session_id, zone, hair_count, density_per_cm2,
+            "%d волос, плотность=%.0f/см² (снимков в серии: %d)",
+            meas_id, session_id, zone, hair_count, density_per_cm2, n_snapshots,
         )
         return measurement
 
@@ -1114,7 +1171,9 @@ class Database:
             date: Дата сессии (YYYY-MM-DD).
             measurements_data: Список словарей с данными измерений.
                 Каждый словарь должен содержать все обязательные поля
-                метода save_measurement() кроме session_id.
+                метода save_measurement() кроме session_id. Необязательные
+                ключи 'n_snapshots' (по умолчанию 1) и 'density_std'
+                (по умолчанию None) — см. save_measurement().
             session_zone: Основная зона сессии или None.
             session_notes: Заметки к сессии или None.
 
@@ -1153,7 +1212,8 @@ class Database:
                             terminal_pct, vellus_pct, intermediate_pct, tv_ratio,
                             fov_area_mm2,
                             image_path, annotated_image_path,
-                            assessment, created_at
+                            assessment, created_at,
+                            n_snapshots, density_std
                         ) VALUES (
                             ?, ?,
                             ?, ?,
@@ -1162,6 +1222,7 @@ class Database:
                             ?, ?, ?,
                             ?, ?, ?, ?,
                             ?,
+                            ?, ?,
                             ?, ?,
                             ?, ?
                         )
@@ -1188,6 +1249,8 @@ class Database:
                             data.get("annotated_image_path"),
                             data.get("assessment"),
                             now,
+                            data.get("n_snapshots", 1),
+                            data.get("density_std"),
                         ),
                     )
         except sqlite3.Error as exc:

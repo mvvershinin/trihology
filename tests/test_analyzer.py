@@ -13,14 +13,36 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import pytest
 
 from phototrichogram.core.analyzer import AnalysisResult, Analyzer
 from phototrichogram.core.classification import HairType
+from phototrichogram.core.measurement import measure_all, split_thick_bundles
+from phototrichogram.core.segmentation import find_hair_contours, segment_hair
 from phototrichogram.utils.config import AnalysisConfig
 
 from .conftest import make_test_image
+
+
+def _transit_image() -> np.ndarray:
+    """Синтетический снимок: диагональный транзитный волос + растущий вертикальный.
+
+    - Диагональ (0,120)->(639,380): оба конца упираются в левую/правую границу
+      кадра — транзитный волос (проходит насквозь). Слегка наклонена, чтобы
+      контур не сжимался CHAIN_APPROX_SIMPLE до 4 точек (иначе измерение бы его
+      отбросило как осевой прямоугольник).
+    - Вертикаль (300,0)->(300,210): верхний конец у границы, нижний в центре
+      кадра — растущий волос (rooted).
+
+    Линии не пересекаются (диагональ в точке x=300 имеет y≈242 > 210), поэтому
+    сегментация выделяет два отдельных контура.
+    """
+    img = np.ones((480, 640, 3), dtype=np.uint8) * 220
+    cv2.line(img, (0, 120), (639, 380), (30, 30, 30), 6)
+    cv2.line(img, (300, 0), (300, 210), (30, 30, 30), 6)
+    return img
 
 # ---------------------------------------------------------------------------
 # Граничные случаи входных данных
@@ -371,3 +393,106 @@ class TestBundledFonts:
 
         font = _get_pil_font(15)
         assert isinstance(font, ImageFont.FreeTypeFont)
+
+
+# ---------------------------------------------------------------------------
+# Режим подсчёта: count_mode = "all" (дефолт) vs "rooted"
+# ---------------------------------------------------------------------------
+
+
+class TestCountMode:
+    """Переключаемый режим подсчёта волос «от корней» (план v1.4, Phase 1)."""
+
+    def test_default_count_mode_is_all(self) -> None:
+        """Дефолт count_mode == 'all' — прежнее поведение не меняется."""
+        assert AnalysisConfig().count_mode == "all"
+
+    def test_all_mode_matches_pipeline_without_rooting(
+        self, sample_image: np.ndarray, default_config: AnalysisConfig
+    ) -> None:
+        """Регрессия: в режиме 'all' счёт равен пайплайну БЕЗ фильтра корней.
+
+        Доказывает, что при дефолтном count_mode='all' детекция корней не
+        применяется — результат идентичен «сегментация → контуры → измерение →
+        фильтр пучков», как было до появления режима.
+        """
+        result = Analyzer(default_config).analyze(sample_image)
+
+        mask = segment_hair(sample_image, default_config)
+        contours = find_hair_contours(mask, default_config)
+        measurements = measure_all(contours, default_config)
+        measurements, _ = split_thick_bundles(measurements, default_config)
+
+        assert result is not None
+        assert result.hair_count == len(measurements)
+
+    def test_all_and_rooted_equal_when_no_transit(
+        self, sample_image: np.ndarray
+    ) -> None:
+        """На снимке без транзитных волос 'all' и 'rooted' дают одинаковый счёт.
+
+        В sample_image «волосы» не касаются границ (оба конца внутри кадра),
+        поэтому все — растущие, и режимы совпадают.
+        """
+        all_result = Analyzer(AnalysisConfig(count_mode="all")).analyze(sample_image)
+        rooted_result = Analyzer(AnalysisConfig(count_mode="rooted")).analyze(sample_image)
+
+        assert all_result is not None
+        assert rooted_result is not None
+        assert rooted_result.hair_count == all_result.hair_count
+        assert rooted_result.density_per_cm2 == all_result.density_per_cm2
+
+    def test_rooted_mode_excludes_transit(self) -> None:
+        """Режим 'rooted' исключает транзитный волос: all=2, rooted=1."""
+        image = _transit_image()
+
+        all_result = Analyzer(AnalysisConfig(count_mode="all")).analyze(image)
+        rooted_result = Analyzer(AnalysisConfig(count_mode="rooted")).analyze(image)
+
+        assert all_result is not None
+        assert rooted_result is not None
+        assert all_result.hair_count == 2
+        assert rooted_result.hair_count == 1
+
+    def test_rooted_density_below_all_when_transit_present(self) -> None:
+        """Транзитный волос исключается → плотность в 'rooted' ниже, чем в 'all'."""
+        image = _transit_image()
+
+        all_result = Analyzer(AnalysisConfig(count_mode="all")).analyze(image)
+        rooted_result = Analyzer(AnalysisConfig(count_mode="rooted")).analyze(image)
+
+        assert all_result is not None
+        assert rooted_result is not None
+        assert rooted_result.density_per_cm2 < all_result.density_per_cm2
+
+    def test_rooted_never_exceeds_all_count(
+        self, sample_image: np.ndarray
+    ) -> None:
+        """Свойство: 'rooted' не может насчитать больше волос, чем 'all'."""
+        all_result = Analyzer(AnalysisConfig(count_mode="all")).analyze(sample_image)
+        rooted_result = Analyzer(AnalysisConfig(count_mode="rooted")).analyze(sample_image)
+
+        assert all_result is not None
+        assert rooted_result is not None
+        assert rooted_result.hair_count <= all_result.hair_count
+
+    def test_rooted_mode_annotation_same_shape(self) -> None:
+        """Аннотация в режиме 'rooted' строится и сохраняет размер снимка."""
+        image = _transit_image()
+
+        result = Analyzer(AnalysisConfig(count_mode="rooted")).analyze_with_annotation(image)
+
+        assert result is not None
+        assert result.annotated_image is not None
+        assert result.annotated_image.shape == image.shape
+
+    def test_unknown_count_mode_behaves_like_all(
+        self, sample_image: np.ndarray
+    ) -> None:
+        """Неизвестное значение count_mode не включает фильтр (безопасный дефолт)."""
+        all_result = Analyzer(AnalysisConfig(count_mode="all")).analyze(sample_image)
+        weird_result = Analyzer(AnalysisConfig(count_mode="whatever")).analyze(sample_image)
+
+        assert all_result is not None
+        assert weird_result is not None
+        assert weird_result.hair_count == all_result.hair_count

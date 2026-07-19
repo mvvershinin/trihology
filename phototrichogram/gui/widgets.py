@@ -563,6 +563,63 @@ def format_tv_ratio(tv_ratio: float) -> str:
     return f"{tv_ratio:.1f}"
 
 
+def _plural_ru(n: int, one: str, few: str, many: str) -> str:
+    """Русское склонение существительного по числу.
+
+    Args:
+        n: Число.
+        one: Форма для 1 (снимок).
+        few: Форма для 2–4 (снимка).
+        many: Форма для 0, 5–20 (снимков).
+
+    Returns:
+        Подходящая форма слова.
+    """
+    n_abs = abs(n) % 100
+    n1 = n_abs % 10
+    if 11 <= n_abs <= 14:
+        return many
+    if n1 == 1:
+        return one
+    if 2 <= n1 <= 4:
+        return few
+    return many
+
+
+def format_density(
+    density: float,
+    density_std: float | None = None,
+    n_snapshots: int = 1,
+    *,
+    with_count: bool = False,
+) -> str:
+    """Текст показа плотности зоны с учётом серии снимков.
+
+    Одиночный снимок (n_snapshots == 1 или density_std is None) — как раньше:
+    «250/см²». Серия — с разбросом: «250 ± 30/см²», а при ``with_count`` ещё и
+    с числом снимков: «250 ± 30/см² (5 снимков)».
+
+    Args:
+        density: Средняя плотность зоны (волос/см²).
+        density_std: Стандартное отклонение плотности по серии или None для
+            одиночного снимка.
+        n_snapshots: Число снимков в серии (1 — одиночный).
+        with_count: Дописывать ли «(N снимков)» — для просторного места
+            (детали зоны); на компактной карточке остаётся False.
+
+    Returns:
+        Строка плотности для интерфейса.
+    """
+    if density_std is None or n_snapshots <= 1:
+        return f"{density:.0f}/см²"
+
+    text = f"{density:.0f} ± {density_std:.0f}/см²"
+    if with_count:
+        word = _plural_ru(n_snapshots, "снимок", "снимка", "снимков")
+        text += f" ({n_snapshots} {word})"
+    return text
+
+
 def patient_norms(patient: Patient | None, today_iso: str | None = None) -> PatientNorms:
     """Персональные референсные нормы для пациента (единый источник для GUI).
 

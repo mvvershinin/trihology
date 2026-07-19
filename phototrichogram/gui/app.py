@@ -22,7 +22,7 @@ from phototrichogram.data.models import Patient
 from phototrichogram.gui.widgets import StatusBar
 
 if TYPE_CHECKING:
-    from phototrichogram.core.analyzer import AnalysisResult
+    from phototrichogram.gui.series import ZoneSeriesResult
     from phototrichogram.utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -477,13 +477,14 @@ class App(tk.Tk):
         if tab is not None:
             self._notebook.select(tab)  # type: ignore[no-untyped-call]
 
-    def navigate_to_results(self, zone_results: dict[str, AnalysisResult]) -> None:
+    def navigate_to_results(self, zone_results: dict[str, ZoneSeriesResult]) -> None:
         """Переключиться на вкладку результатов и загрузить данные.
 
         Вызывается из capture_tab после завершения мультизонального анализа.
 
         Args:
-            zone_results: Словарь {код_зоны: AnalysisResult}.
+            zone_results: Словарь {код_зоны: ZoneSeriesResult} — усреднённые по
+                серии метрики зоны + число снимков и разброс плотности.
         """
         results_tab = self._tabs.get("results")
         if results_tab is not None and hasattr(results_tab, "load_results"):
@@ -545,7 +546,7 @@ class _SettingsDialog(tk.Toplevel):
         """
         super().__init__(parent)
         self.title("Параметры анализа")
-        self.geometry("450x500")
+        self.geometry("470x640")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -594,6 +595,9 @@ class _SettingsDialog(tk.Toplevel):
             cls_frame, "intermediate_threshold_um", "Порог Terminal (мкм):", 1, "double",
         )
 
+        # Подсчёт волос — режим count_mode
+        self._add_count_mode(main_frame)
+
         # Кнопки
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill="x", pady=(10, 0))
@@ -635,6 +639,50 @@ class _SettingsDialog(tk.Toplevel):
         entry = ttk.Entry(parent, textvariable=var, width=15)
         entry.grid(row=row, column=1, sticky="e", padx=5, pady=2)
         self._vars[key] = var
+
+    def _add_count_mode(self, parent: ttk.Widget) -> None:
+        """Секция выбора режима подсчёта волос (count_mode).
+
+        Радиокнопки «Все волосы» = ``all`` (дефолт, прежнее поведение) и
+        «Только растущие» = ``rooted`` (не считает волосы, проходящие через
+        кадр насквозь). StringVar регистрируется в ``self._vars`` под ключом
+        ``count_mode`` — значит, generic ``_load_values`` / ``_on_save``
+        подхватят его как остальные параметры (загрузка из конфига и сохранение
+        в него без спец-обработки).
+
+        Args:
+            parent: Родительский фрейм диалога.
+        """
+        count_frame = ttk.LabelFrame(parent, text="Подсчёт волос", padding=5)
+        count_frame.pack(fill="x", pady=(0, 10))
+
+        count_var = tk.StringVar()
+        self._vars["count_mode"] = count_var
+
+        ttk.Radiobutton(
+            count_frame,
+            text="Все волосы (как есть)",
+            variable=count_var,
+            value="all",
+        ).grid(row=0, column=0, sticky="w", padx=5, pady=1)
+        ttk.Radiobutton(
+            count_frame,
+            text="Только растущие (от корней)",
+            variable=count_var,
+            value="rooted",
+        ).grid(row=1, column=0, sticky="w", padx=5, pady=1)
+
+        ttk.Label(
+            count_frame,
+            text=(
+                "«Только растущие» не считает волосы, проходящие через кадр "
+                "насквозь (растущие вне участка)."
+            ),
+            font=("", 8),
+            foreground="#757575",
+            wraplength=420,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", padx=5, pady=(3, 0))
 
     def _load_values(self) -> None:
         """Загрузка текущих значений из конфигурации."""

@@ -65,7 +65,7 @@ class TestMigrations:
 
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
 
-        assert version == 9
+        assert version == 10
         db.close()
 
     def test_reopening_db_is_idempotent(self, tmp_path: Path) -> None:
@@ -77,7 +77,7 @@ class TestMigrations:
         db2 = Database(db_path)
         version = db2._conn.execute("PRAGMA user_version").fetchone()[0]
 
-        assert version == 9
+        assert version == 10
         db2.close()
 
     def test_fresh_db_has_ethnicity_column(self, temp_db: Database) -> None:
@@ -90,13 +90,15 @@ class TestMigrations:
         assert "ethnicity" in columns
 
     def test_legacy_db_without_ethnicity_column_is_migrated(self, tmp_path: Path) -> None:
-        """БД, созданная до появления ethnicity (версия схемы 8), догоняет до v9.
+        """БД, созданная до появления ethnicity (версия схемы 8), догоняет до текущей.
 
         Схема воспроизводится вручную из миграций 1..8 (без 9) -- имитация
         реальной базы пользователя, обновившегося с более старой версии
         приложения. Открытие через Database должно добавить колонку
-        ethnicity без потери существующих данных, а старые пациенты --
-        получить ethnicity = NULL (в модели -- None).
+        ethnicity (v9) без потери существующих данных, а старые пациенты --
+        получить ethnicity = NULL (в модели -- None). Заодно применяются и
+        все последующие миграции (например, v10 -- колонки серии снимков
+        measurements), версия схемы догоняет до последней (10).
         """
         db_path = tmp_path / "legacy.db"
 
@@ -119,7 +121,7 @@ class TestMigrations:
         db = Database(db_path)
         try:
             version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-            assert version == 9
+            assert version == 10
 
             columns = {
                 row["name"]
@@ -131,6 +133,81 @@ class TestMigrations:
             assert len(patients) == 1
             assert patients[0].name == "Легаси Пациент"
             assert patients[0].ethnicity is None
+        finally:
+            db.close()
+
+    def test_fresh_db_has_measurement_series_columns(self, temp_db: Database) -> None:
+        """Свежая БД сразу содержит колонки n_snapshots/density_std (миграция v10)."""
+        columns = {
+            row["name"]
+            for row in temp_db._conn.execute("PRAGMA table_info(measurements)").fetchall()
+        }
+
+        assert "n_snapshots" in columns
+        assert "density_std" in columns
+
+    def test_legacy_db_without_series_columns_is_migrated(self, tmp_path: Path) -> None:
+        """БД на версии схемы 9 (без n_snapshots/density_std) догоняет до v10.
+
+        Схема воспроизводится вручную из миграций 1..9 (без 10) -- имитация
+        реальной базы пользователя, обновившегося с версии приложения до
+        появления серии снимков (план v1.4). Открытие через Database должно
+        добавить обе колонки без потери существующих измерений, а старые
+        измерения -- получить n_snapshots=1, density_std=NULL (в модели --
+        None), как для одиночного снимка.
+        """
+        db_path = tmp_path / "legacy_v9.db"
+
+        raw = sqlite3.connect(str(db_path))
+        try:
+            for version, sql in _MIGRATIONS:
+                if version >= 10:
+                    continue
+                raw.execute(sql)
+            raw.execute(
+                "INSERT INTO patients (name, gender) VALUES (?, ?)",
+                ("Легаси Пациент", "M"),
+            )
+            raw.execute(
+                "INSERT INTO calibrations "
+                "(um_per_px, fov_width_px, fov_height_px, "
+                " fov_width_mm, fov_height_mm, fov_area_mm2) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (5.9, 640, 480, 3.776, 2.832, 10.694),
+            )
+            raw.execute(
+                "INSERT INTO sessions (patient_id, calibration_id, date) VALUES (?, ?, ?)",
+                (1, 1, "2026-01-01"),
+            )
+            raw.execute(
+                "INSERT INTO measurements (session_id, zone, hair_count, density_per_cm2) "
+                "VALUES (?, ?, ?, ?)",
+                (1, "F", 120, 210.5),
+            )
+            raw.commit()
+            raw.execute("PRAGMA user_version=9")
+            raw.commit()
+        finally:
+            raw.close()
+
+        db = Database(db_path)
+        try:
+            version = db._conn.execute("PRAGMA user_version").fetchone()[0]
+            assert version == 10
+
+            columns = {
+                row["name"]
+                for row in db._conn.execute("PRAGMA table_info(measurements)").fetchall()
+            }
+            assert "n_snapshots" in columns
+            assert "density_std" in columns
+
+            measurements = db.get_session_measurements(1)
+            assert len(measurements) == 1
+            assert measurements[0].zone == "F"
+            assert measurements[0].hair_count == 120
+            assert measurements[0].n_snapshots == 1
+            assert measurements[0].density_std is None
         finally:
             db.close()
 
@@ -534,6 +611,54 @@ class TestMeasurementCrud:
         assert meas.hair_count == 100
         assert meas.density_per_cm2 == 200.0
 
+    def test_save_measurement_defaults_to_single_snapshot(self, temp_db: Database) -> None:
+        """Без явных n_snapshots/density_std -- одиночный снимок (обратная совместимость)."""
+        session_id = self._make_session(temp_db)
+
+        meas = temp_db.save_measurement(
+            session_id=session_id, zone="F", **_measurement_kwargs()
+        )
+
+        assert meas.n_snapshots == 1
+        assert meas.density_std is None
+
+    def test_save_measurement_stores_series_averaging(self, temp_db: Database) -> None:
+        """Явно переданные n_snapshots/density_std сохраняются и читаются обратно."""
+        session_id = self._make_session(temp_db)
+
+        meas = temp_db.save_measurement(
+            session_id=session_id,
+            zone="F",
+            **_measurement_kwargs(),
+            n_snapshots=5,
+            density_std=12.4,
+        )
+
+        assert meas.n_snapshots == 5
+        assert meas.density_std == pytest.approx(12.4)
+
+        reloaded = temp_db.get_measurement(meas.id)
+        assert reloaded == meas
+
+    def test_get_session_measurements_roundtrips_series_fields(
+        self, temp_db: Database
+    ) -> None:
+        """Поля серии не теряются при чтении списка измерений сессии."""
+        session_id = self._make_session(temp_db)
+        temp_db.save_measurement(
+            session_id=session_id,
+            zone="F",
+            **_measurement_kwargs(),
+            n_snapshots=3,
+            density_std=8.0,
+        )
+
+        measurements = temp_db.get_session_measurements(session_id)
+
+        assert len(measurements) == 1
+        assert measurements[0].n_snapshots == 3
+        assert measurements[0].density_std == pytest.approx(8.0)
+
     def test_save_measurement_invalid_session_raises_integrity_error(
         self, temp_db: Database
     ) -> None:
@@ -672,6 +797,31 @@ class TestCreateSessionWithMeasurements:
         measurements = temp_db.get_session_measurements(session.id)
         assert measurements[0].hair_count == 0
         assert measurements[0].density_per_cm2 == 0.0
+        assert measurements[0].n_snapshots == 1
+        assert measurements[0].density_std is None
+
+    def test_series_fields_pass_through_dict(self, temp_db: Database) -> None:
+        """Явно переданные в словаре n_snapshots/density_std сохраняются в БД."""
+        patient = temp_db.add_patient(name="Серия снимков")
+        cal = temp_db.add_calibration(um_per_px=5.9, fov_width_px=640, fov_height_px=480)
+
+        session = temp_db.create_session_with_measurements(
+            patient_id=patient.id,
+            calibration_id=cal.id,
+            date="2026-01-01",
+            measurements_data=[
+                {
+                    "zone": "F",
+                    **_measurement_kwargs(),
+                    "n_snapshots": 5,
+                    "density_std": 15.2,
+                },
+            ],
+        )
+
+        measurements = temp_db.get_session_measurements(session.id)
+        assert measurements[0].n_snapshots == 5
+        assert measurements[0].density_std == pytest.approx(15.2)
 
     def test_failure_mid_batch_rolls_back_session_too(self, temp_db: Database) -> None:
         """Ошибка в середине пакета измерений откатывает и созданную сессию.

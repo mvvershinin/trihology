@@ -863,6 +863,53 @@ class CaptureTab(ttk.Frame):
             logger.error("Ошибка автосохранения: %s", e)
             return None
 
+    def _save_annotated_snapshot(
+        self,
+        result: AnalysisResult | None,
+        source_path: str | None,
+    ) -> str | None:
+        """Сохранить размеченный (аннотированный) снимок рядом с исходником.
+
+        ``result.annotated_image`` (BGR-кадр с контурами волос и подписями)
+        сохраняется в ту же папку, что исходник, с суффиксом «_annotated»
+        перед расширением: ``zone_F_..._annotated.png`` рядом с
+        ``zone_F_....png``. Путь возвращается для привязки к измерению — по
+        нему тумблер «исходный/размеченный» в истории покажет разметку.
+
+        Вызывается из фонового потока анализа (do_analysis): только файловая
+        операция и логирование, tkinter не трогает. Сохранение — через
+        save_image (gui/ не импортирует cv2 напрямую).
+
+        Args:
+            result: Результат анализа снимка (с annotated_image) или None,
+                если анализатор отверг кадр.
+            source_path: Путь исходного снимка на диске или None, если файла
+                нет (захват при выключенном автосохранении).
+
+        Returns:
+            Путь к сохранённому размеченному снимку либо None, если разметку
+            сохранить нельзя или не удалось: нет исходного файла (не рядом с
+            чем класть и некуда привязать), нет аннотации в результате, либо
+            сбой записи на диск. None на позиции → тумблер покажет для этого
+            снимка только исходник.
+        """
+        if result is None or result.annotated_image is None or source_path is None:
+            return None
+        annotated_image = result.annotated_image
+        try:
+            from phototrichogram.utils.image_utils import save_image
+
+            source = Path(source_path)
+            annotated_path = source.with_name(source.stem + "_annotated" + source.suffix)
+            if save_image(annotated_image, annotated_path):
+                logger.debug("Размеченный снимок сохранён: %s", annotated_path)
+                return str(annotated_path)
+            logger.warning("Не удалось сохранить размеченный снимок: %s", annotated_path)
+            return None
+        except Exception as e:
+            logger.error("Ошибка сохранения размеченного снимка: %s", e)
+            return None
+
     # ──────────────────────────── Мультизональный анализ ──────────────────────
 
     def _on_analyze_all(self) -> None:
@@ -913,6 +960,15 @@ class CaptureTab(ttk.Frame):
             метрики усредняются (gui.series.aggregate_series). Снимки, которые
             анализатор отверг (вернул None), пропускаются; зона без единого
             валидного результата в итог не попадает.
+
+            Параллельно исходным кадрам собираются пути размеченных
+            (аннотированных) снимков: у каждого кадра с сохранённым исходником
+            result.annotated_image пишется рядом с исходником (суффикс
+            «_annotated») и путь кладётся в zone_annotated_paths на ту же
+            позицию, что и исходник (см. _save_annotated_snapshot). Кадры без
+            исходного файла, без аннотации или со сбоем сохранения дают None на
+            своей позиции — тумблер «исходный/размеченный» покажет для них
+            только исходник.
             """
             try:
                 from phototrichogram.core.analyzer import Analyzer
@@ -920,21 +976,42 @@ class CaptureTab(ttk.Frame):
 
                 analyzer = Analyzer(self._app.config.analysis)
                 results: dict[str, ZoneSeriesResult] = {}
+                # Пути размеченных снимков по зонам, параллельно исходным кадрам
+                # (та же длина и порядок, что zone_series/zone_paths зоны). None
+                # на позиции — размеченный снимок не сохранён (нет исходника или
+                # аннотации, либо сбой записи).
+                zone_annotated_paths: dict[str, list[str | None]] = {}
 
                 for zone_code, images in zone_series.items():
                     logger.info(
                         "Анализ зоны %s (снимков: %d)...", zone_code, len(images),
                     )
+                    # Исходные пути кадров зоны сняты в GUI-потоке (zone_paths);
+                    # к card.* из фонового потока обращаться нельзя.
+                    source_paths = zone_paths.get(zone_code, [])
                     per_snapshot: list[AnalysisResult] = []
-                    for img in images:
+                    annotated_paths: list[str | None] = []
+                    for i, img in enumerate(images):
                         result = analyzer.analyze_with_annotation(img)
+                        source_path = source_paths[i] if i < len(source_paths) else None
+                        # По одной записи на КАЖДЫЙ кадр (в т.ч. отвергнутый),
+                        # чтобы позиция совпадала с zone_paths[zone_code].
+                        annotated_paths.append(
+                            self._save_annotated_snapshot(result, source_path),
+                        )
                         if result is not None:
                             per_snapshot.append(result)
 
+                    zone_annotated_paths[zone_code] = annotated_paths
                     if per_snapshot:
                         results[zone_code] = aggregate_series(per_snapshot)
 
-                self.after(0, lambda: self._on_analysis_complete(results, zone_paths))
+                self.after(
+                    0,
+                    lambda: self._on_analysis_complete(
+                        results, zone_paths, zone_annotated_paths,
+                    ),
+                )
             except Exception as e:
                 logger.error("Ошибка мультизонального анализа: %s", e)
                 error_msg = str(e)
@@ -946,6 +1023,7 @@ class CaptureTab(ttk.Frame):
         self,
         results: dict[str, ZoneSeriesResult],
         zone_paths: dict[str, list[str | None]],
+        zone_annotated_paths: dict[str, list[str | None]],
     ) -> None:
         """Обработка завершения мультизонального анализа.
 
@@ -954,6 +1032,9 @@ class CaptureTab(ttk.Frame):
                 серии метрики зоны + число снимков и разброс плотности.
             zone_paths: Пути файлов серии по зонам (параллельно снимкам зоны) —
                 для привязки к созданным измерениям (просмотр в истории).
+            zone_annotated_paths: Пути размеченных снимков по зонам (параллельно
+                снимкам зоны, та же позиция, что и zone_paths). None на позиции —
+                размеченного снимка нет (тумблер покажет только исходник).
         """
         self._progress.stop()
         self._progress.pack_forget()
@@ -964,7 +1045,7 @@ class CaptureTab(ttk.Frame):
             return
 
         # Сохранить результаты в БД если есть активный пациент
-        self._save_results_to_db(results, zone_paths)
+        self._save_results_to_db(results, zone_paths, zone_annotated_paths)
 
         # Передать результаты во вкладку «Результаты»
         self._app.navigate_to_results(results)
@@ -977,6 +1058,7 @@ class CaptureTab(ttk.Frame):
         self,
         results: dict[str, ZoneSeriesResult],
         zone_paths: dict[str, list[str | None]],
+        zone_annotated_paths: dict[str, list[str | None]],
     ) -> None:
         """Сохранить результаты анализа в базу данных.
 
@@ -985,11 +1067,14 @@ class CaptureTab(ttk.Frame):
         В каждое измерение пишутся усреднённые по серии метрики плюс
         n_snapshots (число снимков) и density_std (разброс плотности).
         После создания измерений к ним привязываются файлы серии снимков
-        (:meth:`_save_measurement_images`) — для просмотра в истории.
+        (:meth:`_save_measurement_images`) — исходные и размеченные, для
+        просмотра в истории.
 
         Args:
             results: Словарь {код_зоны: ZoneSeriesResult}.
             zone_paths: Пути файлов серии по зонам (параллельно снимкам зоны).
+            zone_annotated_paths: Пути размеченных снимков по зонам (параллельно
+                снимкам зоны, та же позиция, что и zone_paths).
         """
         patient = self._app.active_patient
         if patient is None:
@@ -1055,9 +1140,9 @@ class CaptureTab(ttk.Frame):
             )
 
             # Привязать файлы серии снимков к созданным измерениям (для
-            # просмотра снимков в истории). Отдельная операция: её сбой не
-            # отменяет уже сохранённые измерения.
-            self._save_measurement_images(session, zone_paths)
+            # просмотра снимков в истории) — исходные и размеченные. Отдельная
+            # операция: её сбой не отменяет уже сохранённые измерения.
+            self._save_measurement_images(session, zone_paths, zone_annotated_paths)
 
             self._app.status_bar.set_ready(
                 f"Результаты сохранены для {patient.name} ({len(results)} зон)",
@@ -1074,13 +1159,17 @@ class CaptureTab(ttk.Frame):
         self,
         session: Session,
         zone_paths: dict[str, list[str | None]],
+        zone_annotated_paths: dict[str, list[str | None]],
     ) -> None:
         """Привязать файлы серии снимков к измерениям сессии.
 
         Для каждой зоны находит созданное измерение (по коду зоны) и пишет
         пути её снимков в таблицу measurement_images — по строке на снимок,
         ordinal = позиция кадра в серии. Снимки без файла на диске (None —
-        захват при выключенном автосохранении) пропускаются.
+        захват при выключенном автосохранении) пропускаются. Рядом с исходным
+        путём пишется путь размеченного снимка (annotated_image_path) с той же
+        позиции (по ordinal); если размеченного нет (None) — в БД NULL, и
+        тумблер «исходный/размеченный» покажет для этого снимка только исходник.
 
         Сбой записи снимков не критичен: измерения уже сохранены, зона просто
         останется без привязанных снимков (как старые записи до Phase 5a),
@@ -1089,6 +1178,8 @@ class CaptureTab(ttk.Frame):
         Args:
             session: Только что созданная сессия (с заполненным id).
             zone_paths: Пути файлов серии по зонам (параллельно снимкам зоны).
+            zone_annotated_paths: Пути размеченных снимков по зонам (параллельно
+                снимкам зоны, та же позиция, что и zone_paths).
         """
         if session.id is None:
             return
@@ -1103,10 +1194,21 @@ class CaptureTab(ttk.Frame):
                 measurement_id = zone_to_measurement.get(zone_code)
                 if measurement_id is None:
                     continue
+                # Размеченные пути параллельны исходным: сопоставляем по ordinal
+                # (позиции кадра), а не по отфильтрованному списку. Если для зоны
+                # размеченных нет — annotated_image_path=None (обратная
+                # совместимость: поведение как без разметки).
+                annotated = zone_annotated_paths.get(zone_code, [])
                 # Только снимки с реальным файлом на диске; ordinal сохраняет
                 # исходную позицию кадра в серии (пропущенные None не смещают).
                 images: list[dict[str, Any] | tuple[Any, ...]] = [
-                    {"image_path": path, "ordinal": ordinal}
+                    {
+                        "image_path": path,
+                        "annotated_image_path": (
+                            annotated[ordinal] if ordinal < len(annotated) else None
+                        ),
+                        "ordinal": ordinal,
+                    }
                     for ordinal, path in enumerate(paths)
                     if path is not None
                 ]

@@ -212,164 +212,184 @@ PMC11497558]; программа снижает нижнюю границу но
 
 ## 4. Алгоритм анализа изображений
 
-> **Примечание (2026-07-18)**: описание пайплайна в этом разделе частично
-> устарело. Фактическая реализация (`core/segmentation.py`) использует
-> **Black-hat морфологию + Otsu/Adaptive порог** вместо Intermodes и
-> **не применяет** fill_holes (заполнение дыр сливает тонкие волосы).
-> Актуальные значения параметров — §7.1 и `utils/config.py` (источник истины —
-> код). Полная актуализация раздела — в списке задач.
+> **Синхронизировано с кодом (2026-07-20).** Раздел описывает фактический
+> пайплайн — оркестратор `core/analyzer.py` (`Analyzer._run_pipeline`) и модули
+> `core/segmentation.py`, `core/measurement.py`, `core/roots.py`,
+> `core/classification.py`, `core/stats.py`. Все числовые параметры —
+> дефолты `AnalysisConfig` (`utils/config.py`), сведены в §7.1. При расхождении
+> текста и кода источник истины — код.
 
 ### 4.1 Общая схема пайплайна
 
+Порядок шагов — `Analyzer._run_pipeline` (`core/analyzer.py`).
+
 ```
-Исходное изображение (RGB, 640×480)
+Исходное изображение (BGR, напр. 640×480)
         │
         ▼
-[1] Предобработка
-        │  → Grayscale (8-bit)
-        │  → Нормализация контраста (CLAHE или saturated=2%)
-        │  → Медианный фильтр (radius=2) — удаление шума
+[1] Предобработка  — core/segmentation.py: preprocess()
+        │  → Grayscale (8-bit, если вход цветной)
+        │  → CLAHE (clipLimit=2.0, tileGridSize 8×8)
+        │  → Медианный фильтр (ядро 5, приводится к нечётному)
         │
         ▼
-[2] Сегментация волос
-        │  → Автопорог (метод Intermodes)
-        │  → Морфологическое закрытие (Close) — заполнение разрывов
-        │  → Морфологическое открытие (Open) — удаление мусора
-        │  → Заполнение дыр (Fill Holes)
+[2] Сегментация волос  — segment_hair()
+        │  → Black-hat морфология (эллипс 25×25) — выделяет тёмные тонкие структуры
+        │  → Бинаризация black-hat: Otsu (дефолт) или Adaptive, THRESH_BINARY
+        │  → Контроль пересвета: белых > max_white_pct (30%) → порог по 75-му перцентилю
+        │  → Морфология: закрытие + открытие (эллипс 3×3, по 1 итерации)
+        │  → БЕЗ fill_holes (заполнение дыр сливает тонкие волосы в блобы)
         │
         ▼
-[3] Детекция отдельных волос (Particle Analysis)
-        │  → Фильтр по площади: > MIN_HAIR_AREA (200 px²)
-        │  → Фильтр по форме: circularity < MAX_CIRCULARITY (0.4)
-        │  → Результат: контуры (ROI) каждого волоса
+[3] Детекция контуров  — find_hair_contours()  (RETR_EXTERNAL)
+        │  → площадь ≥ min_hair_area (150 px²)
+        │  → циркулярность ≤ max_circularity (0.6)
+        │  → аспект max/min ≥ min_aspect_ratio (2.5)
         │
         ▼
-[4] Измерение параметров каждого волоса
-        │  → MinFeret (минимальный диаметр) → толщина
-        │  → Area → площадь сечения
-        │  → Perimeter → периметр
+[4] Измерение  — measure_all() → measure_hair()
+        │  → minAreaRect → MinFeret (толщина), MaxFeret (длина в кадре)
+        │  → площадь, периметр, циркулярность, центр, угол
+        │  → пересчёт px → мкм (× um_per_px = 5.9)
         │
         ▼
-[5] Классификация
-        │  → Terminal: MinFeret ≥ порог (5 px = 30 мкм)
-        │  → Vellus: MinFeret < порог
+[4a] Фильтр слипшихся пучков  — split_thick_bundles()
+        │  → толщина > max_hair_thickness_um (150 мкм) → пучок, исключён из подсчёта
         │
         ▼
-[6] Статистика и отчёт
-        → Плотность = кол-во / площадь_поля × 100 (волос/см²)
-        → Средняя толщина, мин, макс
-        → % Terminal, % Vellus
-        → Гистограмма распределения толщин
-        → Сравнение с контрольной зоной
+[4b] Подсчёт «от корней»  — только count_mode='rooted' (core/roots.py, см. §4.9)
+        │  → транзитные волосы исключаются; дефолт 'all' — шаг не выполняется
+        │
+        ▼
+[5] Классификация  — classify_all()
+        │  → Vellus: толщина < 30 мкм (vellus_threshold_um)
+        │  → Intermediate: 30 ≤ толщина < 40 мкм
+        │  → Terminal: толщина ≥ 40 мкм (intermediate_threshold_um)
+        │
+        ▼
+[6] Статистика и аннотация  — core/stats.py, _annotate_image()
+        → Плотность = кол-во / площадь_поля(мм²) × 100 (волос/см²)
+        → Соотношения T/I/V, T/V; толщина: mean, median, std, min, max
+        → Аннотация: зелёный=Terminal, оранжевый=Intermediate, красный=Vellus,
+          пурпурный=пучок (искл.), серый=транзит (искл. в rooted) + инфопанель
 ```
 
 ### 4.2 Предобработка (подробно)
 
-**Вход:** RGB изображение 640×480 (YUYV с камеры → BGR через OpenCV)
+Функция `preprocess()` (`core/segmentation.py`). **Вход:** BGR-изображение с
+камеры (любой размер).
 
-**Шаг 1 — Grayscale:**
+**Шаг 1 — Grayscale (только если вход цветной):**
 ```python
-gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
 ```
 
-**Шаг 2 — Нормализация контраста:**
+**Шаг 2 — CLAHE (адаптивная нормализация контраста):**
 ```python
-# Вариант A: CLAHE (адаптивный, предпочтительный)
-clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+tile = config.clahe_tile_size            # 8
+clahe = cv2.createCLAHE(
+    clipLimit=config.clahe_clip_limit,   # 2.0
+    tileGridSize=(tile, tile),
+)
 enhanced = clahe.apply(gray)
-
-# Вариант B: Линейная нормализация (saturated=2%)
-# Обрезаем 2% самых тёмных и светлых пикселей, растягиваем на 0-255
-p_low, p_high = np.percentile(gray, [2, 98])
-enhanced = np.clip((gray - p_low) * 255.0 / (p_high - p_low), 0, 255).astype(np.uint8)
 ```
+CLAHE выравнивает локальный контраст по тайлам — единственный метод
+нормализации в коде (линейная растяжка по перцентилям не используется).
 
-**Шаг 3 — Шумоподавление:**
+**Шаг 3 — Шумоподавление (медианный фильтр):**
 ```python
-# Медианный фильтр — сохраняет края (контуры волос)
-denoised = cv2.medianBlur(enhanced, 5)  # kernel=5 (radius≈2)
+kernel = config.median_blur_kernel       # 5
+if kernel % 2 == 0:                       # ядро приводится к нечётному
+    kernel += 1
+denoised = cv2.medianBlur(enhanced, kernel)
 ```
+Медиана сохраняет края (контуры волос) и убирает точечный шум.
 
 ### 4.3 Сегментация (подробно)
 
-**Цель:** бинарная маска, где белый = волос, чёрный = кожа/фон.
+Функция `segment_hair()`. **Цель:** бинарная маска, где белый (255) = волос,
+чёрный (0) = кожа/фон.
 
-**Автопорог — метод Intermodes:**
+**Шаг 1 — Black-hat морфология.** Ключевая операция вместо порога по яркости
+(старый метод Intermodes НЕ используется). Black-hat = `closing(image) − image`
+выделяет тёмные объекты *меньше* ядра (тонкие волосы) и подавляет плавные
+градиенты кожи. Размер ядра берётся БОЛЬШЕ толщины самого толстого волоса.
 ```python
-# OpenCV не имеет встроенного Intermodes, реализация:
-def threshold_intermodes(image):
-    hist = cv2.calcHist([image], [0], None, [256], [0, 256]).flatten()
-    
-    # Сглаживание гистограммы до бимодальности
-    smoothed = hist.copy()
-    while count_modes(smoothed) > 2:
-        smoothed = np.convolve(smoothed, [0.25, 0.5, 0.25], mode='same')
-    
-    # Порог = среднее между двумя модами
-    modes = find_modes(smoothed)
-    threshold = int((modes[0] + modes[1]) / 2)
-    
-    _, binary = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY_INV)
-    return binary
-
-# Альтернатива: Otsu (проще, часто не хуже)
-_, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+size = config.blackhat_kernel_size        # 25 (приводится к нечётному)
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+blackhat = cv2.morphologyEx(denoised, cv2.MORPH_BLACKHAT, kernel)
 ```
 
-**Почему THRESH_BINARY_INV:** волосы тёмные на светлом фоне кожи → инвертируем, чтобы волосы стали белыми.
-
-**Морфологические операции:**
+**Шаг 2 — Бинаризация black-hat результата.** После black-hat волосы —
+яркие пики на тёмном фоне, поэтому используется `THRESH_BINARY` (НЕ `_INV`).
+Метод выбирается `config.threshold_method`:
 ```python
-kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-
-# Закрытие (Close) — соединяет разрывы в контурах волос
-closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-# Открытие (Open) — удаляет мелкий мусор (артефакты < ядра)
-opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=1)
-
-# Заполнение дыр внутри контуров
-# (floodFill от краёв, потом инвертировать)
-filled = fill_holes(opened)
+if config.threshold_method == "adaptive":
+    block = config.adaptive_block_size    # 15 (нечётное)
+    binary = cv2.adaptiveThreshold(
+        blackhat, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, block, -config.adaptive_c,   # C = -2.0
+    )
+else:  # "otsu" — дефолт
+    _, binary = cv2.threshold(
+        blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
 ```
 
-**Реализация fill_holes:**
+**Шаг 3 — Контроль пересвета.** Если после бинаризации белых пикселей больше
+`max_white_pct` (30%), порог считается слишком мягким (шум/блик) и ужесточается
+по 75-му перцентилю ненулевых значений black-hat:
 ```python
-def fill_holes(binary):
-    h, w = binary.shape
-    mask = np.zeros((h + 2, w + 2), np.uint8)
-    flood = binary.copy()
-    cv2.floodFill(flood, mask, (0, 0), 255)
-    flood_inv = cv2.bitwise_not(flood)
-    return binary | flood_inv
+white_pct = np.count_nonzero(binary) / binary.size * 100
+if white_pct > config.max_white_pct:      # 30.0
+    p = np.percentile(blackhat[blackhat > 0], 75)
+    _, binary = cv2.threshold(blackhat, int(p), 255, cv2.THRESH_BINARY)
 ```
 
-### 4.4 Детекция волос (Particle Analysis)
-
-**В OpenCV — через contours:**
+**Шаг 4 — Морфология (post-threshold).** Лёгкое закрытие (соединяет разрывы
+внутри волоса) и открытие (убирает мелкий мусор), ядро — эллипс
+`morph_kernel_size` (3×3):
 ```python
-contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+k = cv2.getStructuringElement(
+    cv2.MORPH_ELLIPSE, (config.morph_kernel_size, config.morph_kernel_size)
+)
+if config.morph_close_iterations > 0:     # 1
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k,
+                              iterations=config.morph_close_iterations)
+if config.morph_open_iterations > 0:      # 1
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k,
+                              iterations=config.morph_open_iterations)
+```
+
+**Почему НЕТ fill_holes.** Заполнение дыр (floodFill) объединяет близко идущие
+тонкие волосы в сплошные блобы и искажает измеряемую толщину — для трихоскопии
+это критично, поэтому шаг намеренно исключён (в отличие от старого пайплайна).
+
+### 4.4 Детекция волос (анализ контуров)
+
+Функция `find_hair_contours()`. Контуры внешние (`RETR_EXTERNAL`), каждый
+проходит три фильтра:
+```python
+contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
 hairs = []
 for cnt in contours:
     area = cv2.contourArea(cnt)
+    if area < config.min_hair_area:            # 150 px²
+        continue
+
     perimeter = cv2.arcLength(cnt, True)
-    
-    # Фильтр по площади
-    if area < MIN_HAIR_AREA:  # 200 px²
+    if perimeter <= 0:
         continue
-    
-    # Circularity = 4π × area / perimeter²
-    # Круг = 1.0, длинный объект → 0
-    if perimeter > 0:
-        circularity = 4 * np.pi * area / (perimeter * perimeter)
-    else:
+    circularity = 4.0 * np.pi * area / (perimeter * perimeter)
+    if circularity > config.max_circularity:   # 0.6
         continue
-    
-    # Фильтр по форме — волосы вытянутые (circularity < 0.4)
-    if circularity > MAX_CIRCULARITY:  # 0.4
-        continue
-    
+
+    if len(cnt) >= 5:                          # аспект по minAreaRect
+        (_, _), (w, h), _ = cv2.minAreaRect(cnt)
+        if w > 0 and h > 0 and max(w, h) / min(w, h) < config.min_aspect_ratio:  # 2.5
+            continue
+
     hairs.append(cnt)
 ```
 
@@ -377,63 +397,91 @@ for cnt in contours:
 
 | Параметр | Значение | Почему |
 |----------|----------|--------|
-| MIN_HAIR_AREA | 200 px² | Отсекает мусор, пыль, артефакты |
-| MAX_CIRCULARITY | 0.4 | Волос вытянут; круглые объекты = не волос |
+| min_hair_area | 150 px² | Отсекает мусор, пыль, артефакты |
+| max_circularity | 0.6 | Волос вытянут; близкое к кругу = не волос |
+| min_aspect_ratio | 2.5 | Волос длинный и тонкий: длинная сторона ≥ 2.5× короткой |
 
-Эти параметры калибруются под конкретный микроскоп и увеличение. При другом разрешении/масштабе — пересчитать.
+Циркулярность = 4π·area / perimeter² (круг = 1.0, вытянутый объект → 0).
+Параметры калибруются под конкретный микроскоп/увеличение (§7.1–7.2).
 
-### 4.5 Измерение толщины (MinFeret)
+### 4.5 Измерение параметров и фильтр слипшихся пучков
 
-**MinFeret** — минимальная ширина описанного прямоугольника повёрнутого на произвольный угол. Для вытянутого объекта (волос) это и есть толщина.
-
+**Измерение — `measure_hair()` (`core/measurement.py`).** Толщина через
+минимальный описанный прямоугольник (`minAreaRect`): MinFeret (меньшая сторона)
+= толщина волоса, MaxFeret (большая) = длина волоса в кадре. Результат —
+dataclass `HairMeasurement` (не словарь), пересчёт px → мкм через `um_per_px`.
 ```python
-def measure_hair(contour):
-    # MinAreaRect → повёрнутый прямоугольник
-    rect = cv2.minAreaRect(contour)
-    (cx, cy), (w, h), angle = rect
-    
-    # MinFeret = меньшая сторона прямоугольника
-    min_feret = min(w, h)
-    max_feret = max(w, h)  # длина волоса в кадре
-    
+def measure_hair(contour, config):
+    if len(contour) < 5:                     # мало точек — контур невалиден
+        return None
+    (cx, cy), (w, h), angle = cv2.minAreaRect(contour)
+    min_feret, max_feret = min(w, h), max(w, h)
+    if min_feret <= 0:
+        return None
     area = cv2.contourArea(contour)
     perimeter = cv2.arcLength(contour, True)
-    circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else 0
-    
-    return {
-        'min_feret': min_feret,        # толщина (px)
-        'max_feret': max_feret,        # длина в кадре (px)
-        'area': area,                   # площадь (px²)
-        'perimeter': perimeter,         # периметр (px)
-        'circularity': circularity,     # форм-фактор
-        'center': (cx, cy),            # центр масс
-        'angle': angle,                 # угол наклона
-        'contour': contour             # контур для визуализации
-    }
+    if perimeter <= 0:
+        return None
+    return HairMeasurement(
+        thickness_px=min_feret,
+        thickness_um=min_feret * config.um_per_px,   # 5.9 мкм/px
+        length_px=max_feret,
+        length_um=max_feret * config.um_per_px,
+        area=area,
+        perimeter=perimeter,
+        circularity=4.0 * np.pi * area / (perimeter * perimeter),
+        center=(cx, cy),
+        angle=angle,
+        contour=contour,
+    )
 ```
 
-**Пересчёт в микроны:**
+**Фильтр слипшихся пучков — `split_thick_bundles()`.** Физический фильтр
+невозможных толщин: один волос не бывает толще `max_hair_thickness_um`
+(150 мкм). Контур толще — это слипшиеся соседние волосы, которые сегментация
+объединила в один объект (см. §9, ограничение 3). Такие пучки завышают счёт,
+среднюю толщину и плотность, поэтому исключаются из подсчёта, плотности,
+соотношений и статистики толщин. Отдельно сохраняются только для аннотации
+(обводятся пурпурным).
 ```python
-thickness_um = min_feret * CALIBRATION_UM_PER_PX  # 5.9 мкм/px
+hairs, bundles = [], []
+for m in measurements:
+    (bundles if m.thickness_um > config.max_hair_thickness_um else hairs).append(m)
 ```
+Чтобы отключить фильтр, задают большой `max_hair_thickness_um`. Подсчёт «от
+корней» (транзитные волосы, режим `count_mode='rooted'`) применяется следующим
+шагом по той же логике исключения — подробно в §4.9.
 
-### 4.6 Классификация Terminal / Vellus
+### 4.6 Классификация Terminal / Intermediate / Vellus
 
+Функция `classify_hair()` (`core/classification.py`). Три категории по толщине
+в микронах, пороги из конфига (строгие неравенства):
 ```python
-VELLUS_THRESHOLD_UM = 30  # мкм (клинический стандарт)
-VELLUS_THRESHOLD_PX = VELLUS_THRESHOLD_UM / CALIBRATION_UM_PER_PX  # 30 / 5.9 ≈ 5 px
-
-def classify_hair(hair):
-    if hair['min_feret'] >= VELLUS_THRESHOLD_PX:
-        return 'terminal'
+def classify_hair(m, config):
+    if m.thickness_um < config.vellus_threshold_um:          # 30 мкм
+        return HairType.VELLUS
+    elif m.thickness_um < config.intermediate_threshold_um:  # 40 мкм
+        return HairType.INTERMEDIATE
     else:
-        return 'vellus'
+        return HairType.TERMINAL
 ```
 
-Некоторые системы используют 3 категории:
-- Terminal: > 40 мкм (толстый, пигментированный)
-- Intermediate: 30–40 мкм (промежуточный, ранняя миниатюризация)
-- Vellus: < 30 мкм (пушковый, тонкий)
+| Категория | Толщина | Клинический смысл |
+|-----------|---------|-------------------|
+| Vellus | < 30 мкм | Пушковый, тонкий (миниатюризация) |
+| Intermediate | 30–40 мкм | Промежуточный, ранняя миниатюризация |
+| Terminal | ≥ 40 мкм | Толстый, пигментированный (норма) |
+
+`classify_all()` заполняет поле `HairMeasurement.classification`, после чего
+`core/stats.py` считает по реальным волосам (без пучков и, в режиме `rooted`,
+без транзитных):
+
+- **Плотность** — `calculate_density()` = кол-во / площадь_поля(мм²) × 100.
+  Площадь поля зрения берётся из фактических размеров кадра:
+  `(w·um_per_px/1000)·(h·um_per_px/1000)` мм² (для 640×480 при 5.9 мкм/px ≈ 10.6 мм²).
+- **Соотношения** — `calculate_ratios()`: количества и проценты T/I/V,
+  соотношение T/V = terminal/vellus (при отсутствии пушковых — потолок 99.9).
+- **Толщина** — `thickness_statistics()`: mean, median, std, min, max.
 
 ### 4.7 Анализ Anagen/Telogen
 
@@ -930,7 +978,9 @@ def plot_history(sessions):
 | CALIBRATION_UM_PER_PX | 5.9 | мкм/px | Калибровочная шкала 0.1мм/дел, 17 px/дел |
 | FOV_AREA_MM2 | 10.6 | мм² | 3.8 × 2.8 мм |
 | VELLUS_THRESHOLD_PX | 5 | px | 30 мкм / 5.9 |
-| VELLUS_THRESHOLD_UM | 30 | мкм | Клинический стандарт |
+| VELLUS_THRESHOLD_UM | 30 | мкм | Клинический стандарт (< 30 = vellus) |
+| INTERMEDIATE_THRESHOLD_UM | 40 | мкм | Порог terminal (≥ 40 = terminal), см. §4.6 |
+| MAX_HAIR_THICKNESS_UM | 150 | мкм | Физический максимум одного волоса; толще = слипшийся пучок (исключается), см. §4.5 |
 | MIN_HAIR_AREA | 150 | px² | Эмпирически, подстроено на реальных снимках (отсечка мусора) |
 | MAX_CIRCULARITY | 0.6 | безразм. | Волосы вытянуты, круглое = не волос; подстроено эмпирически |
 | MEDIAN_FILTER_RADIUS | 2 | px | Баланс шум/детализация (ядро 5) |

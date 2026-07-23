@@ -7,9 +7,11 @@ SQLite база данных: подключение, миграции, CRUD.
 - Версионные миграции через PRAGMA user_version
 - Контекстный менеджер (with Database(...) as db)
 - Транзакции с автоматическим rollback при ошибках
+- Резервное копирование и восстановление (backup_to/restore_from) через
+  Online Backup API SQLite — корректно и атомарно при включённом WAL
 
-Используется только stdlib: sqlite3, pathlib, logging, datetime.
-НЕ импортирует cv2 или tkinter.
+Используется только stdlib: sqlite3, pathlib, logging, datetime, os,
+shutil, tempfile. НЕ импортирует cv2 или tkinter.
 
 Пример использования::
 
@@ -24,8 +26,12 @@ SQLite база данных: подключение, миграции, CRUD.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import shutil
 import sqlite3
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -254,6 +260,106 @@ def _normalize_measurement_image_entry(
     return str(image_path), annotated_image_path, int(ordinal)
 
 
+# ─── Резервное копирование и восстановление ──────────────────────────────────
+
+# Таблицы, наличие которых подтверждает, что файл — БД именно этого
+# приложения, а не произвольный (пусть даже структурно валидный) файл SQLite.
+_BACKUP_REQUIRED_TABLES = frozenset({"patients", "sessions", "measurements"})
+
+
+class BackupError(Exception):
+    """Ошибка резервного копирования или восстановления БД.
+
+    Гарантия для ``restore_from``: если поднят именно ``BackupError`` (а не
+    подкласс ``RestoreError``), замена файла БД ещё НЕ началась — текущие данные
+    целы, соединение рабочее. Причина: невалидный файл бэкапа, запрет путей,
+    сбой копирования ДО точки невозврата (os.replace).
+    """
+
+
+class RestoreError(BackupError):
+    """Восстановление прервано ПОСЛЕ начала замены файла БД.
+
+    Поднимается, когда ``os.replace`` уже подставил данные бэкапа, но
+    последующий шаг (очистка WAL/SHM или переоткрытие соединения) упал. В
+    отличие от ``BackupError``, здесь утверждать «текущие данные сохранены»
+    НЕЛЬЗЯ: файл БД уже заменён, состояние приложения неопределённо —
+    пользователю следует перезапустить программу.
+    """
+
+
+def _validate_backup_file(src_path: Path) -> None:
+    """Проверка, что src_path — корректный файл БД приложения.
+
+    Открывает src_path отдельным, независимым соединением sqlite3 и
+    ничего в него не записывает. Состояние текущей (открытой) БД
+    приложения эта функция не видит и никак не затрагивает — вызывается
+    ДО того, как restore_from() решится закрыть текущее соединение и
+    заменить файл. Если валидация не пройдена — поднимается BackupError
+    и текущая БД остаётся полностью нетронутой и рабочей.
+
+    Args:
+        src_path: Путь к предполагаемому файлу резервной копии.
+
+    Raises:
+        BackupError: Если файл не существует, не открывается, повреждён
+            (PRAGMA integrity_check вернул не 'ok'), не содержит ключевых
+            таблиц приложения (patients, sessions, measurements) или имеет
+            user_version <= 0 (пустая либо неинициализированная схема —
+            в частности, так выглядит любой файл SQLite без применённых
+            миграций этого приложения).
+    """
+    if not src_path.is_file():
+        raise BackupError(f"Файл резервной копии не найден: {src_path}")
+
+    try:
+        check_conn = sqlite3.connect(str(src_path))
+    except sqlite3.Error as exc:
+        raise BackupError(
+            f"Не удалось открыть файл резервной копии: {src_path}"
+        ) from exc
+
+    try:
+        try:
+            integrity_rows = check_conn.execute("PRAGMA integrity_check").fetchall()
+            integrity_ok = len(integrity_rows) == 1 and integrity_rows[0][0] == "ok"
+
+            existing_tables = {
+                row[0]
+                for row in check_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            user_version = check_conn.execute("PRAGMA user_version").fetchone()[0]
+        except sqlite3.Error as exc:
+            # Например, "file is not a database" — файл не является SQLite
+            # вообще (текстовый мусор, обрезанная копия и т.п.).
+            raise BackupError(
+                f"Файл повреждён или не является базой данных SQLite: {src_path}"
+            ) from exc
+
+        if not integrity_ok:
+            details = "; ".join(str(row[0]) for row in integrity_rows)
+            raise BackupError(
+                f"Проверка целостности файла не пройдена ({src_path}): {details}"
+            )
+
+        missing = _BACKUP_REQUIRED_TABLES - existing_tables
+        if missing:
+            raise BackupError(
+                "Файл не похож на БД приложения — отсутствуют таблицы "
+                f"{sorted(missing)}: {src_path}"
+            )
+
+        if user_version <= 0:
+            raise BackupError(
+                f"Некорректная версия схемы БД (user_version={user_version}): {src_path}"
+            )
+    finally:
+        check_conn.close()
+
+
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 
@@ -273,11 +379,26 @@ class Database:
             db_path: Путь к файлу SQLite. Будет создан если не существует.
         """
         self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn: sqlite3.Connection | None = None
+        self._open()
+        logger.info("База данных открыта: %s", db_path)
 
-        self._conn: sqlite3.Connection | None = sqlite3.connect(
-            str(db_path), check_same_thread=False,
-        )
+    def _open(self) -> None:
+        """Открытие соединения с self.db_path: директория, PRAGMA, миграции.
+
+        Общая логика для __init__() и restore_from() — вынесена сюда,
+        чтобы не дублировать её: оба места должны открыть соединение с
+        self.db_path совершенно одинаково (WAL, внешние ключи,
+        пользовательская функция py_lower(), версионные миграции).
+
+        Создаёт self.db_path.parent, если её ещё нет (актуально и для
+        первого запуска в __init__(), и для restore_from() — на случай,
+        если каталог данных был удалён между закрытием старого
+        соединения и восстановлением).
+        """
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
 
         # Пользовательская функция lower() с поддержкой кириллицы.
@@ -290,7 +411,6 @@ class Database:
         self._conn.execute("PRAGMA foreign_keys=ON")
 
         self._run_migrations()
-        logger.info("База данных открыта: %s", db_path)
 
     # ── Контекстный менеджер ─────────────────────────────────────────────────
 
@@ -1569,3 +1689,206 @@ class Database:
             patient_id,
         )
         return session
+
+    # ── Резервное копирование и восстановление ──────────────────────────────
+
+    def backup_to(self, dest_path: Path) -> None:
+        """Атомарное резервное копирование БД в файл dest_path.
+
+        Использует Online Backup API SQLite (``sqlite3.Connection.backup()``),
+        а НЕ копирование файла .db — это единственный корректный способ
+        снять консистентный снимок БД при включённом WAL-режиме (см.
+        _open()): часть уже закоммиченных данных может физически находиться
+        в файле ``{db_path}-wal`` рядом с основным .db, и наивное
+        копирование одного лишь .db без него дало бы устаревшую или
+        повреждённую копию. Backup API читает согласованный снимок текущей
+        БД (прозрачно учитывая WAL) и пишет его в dest_path постранично,
+        независимо от активности других читателей.
+
+        Файл dest_path создаётся как самодостаточный однофайловый бэкап
+        без журнала WAL (после копирования на dest_path принудительно
+        выставляется ``PRAGMA journal_mode=DELETE`` — иначе бэкап унаследовал
+        бы из заголовка исходной БД пометку WAL, хотя рядом с ним не будет
+        ни ``-wal``, ни ``-shm`` файла). Если dest_path уже существует, его
+        содержимое полностью перезаписывается результатом backup().
+
+        Args:
+            dest_path: Путь к файлу резервной копии. Родительские
+                директории создаются автоматически, если их ещё нет.
+
+        Raises:
+            BackupError: Если не удалось создать директорию, открыть или
+                записать файл бэкапа (нет прав, нет места на диске, сбой
+                SQLite и т.п.). Исходное исключение сохраняется как
+                ``__cause__`` (см. ``raise ... from exc``).
+        """
+        # Запрет бэкапа поверх активной БД: два соединения к одному файлу плюс
+        # PRAGMA journal_mode=DELETE на живой WAL-БД — неопределённое поведение.
+        if dest_path.resolve() == self.db_path.resolve():
+            raise BackupError("Нельзя сохранять резервную копию поверх активной базы")
+
+        conn = self._get_conn()
+        # Бэкап пишем во временный файл рядом с назначением, затем атомарно
+        # переименовываем: при сбое (нет места, I/O) существующий бэкап по
+        # dest_path остаётся целым, а не затирается наполовину.
+        dst_conn: sqlite3.Connection | None = None
+        tmp_path: Path | None = None
+        try:
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=dest_path.parent, prefix=f".{dest_path.name}.backup-", suffix=".tmp",
+            )
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+
+            dst_conn = sqlite3.connect(str(tmp_path))
+            with dst_conn:
+                conn.backup(dst_conn)
+            dst_conn.execute("PRAGMA journal_mode=DELETE")
+            dst_conn.close()
+            dst_conn = None
+
+            os.replace(tmp_path, dest_path)
+            tmp_path = None
+        except (OSError, sqlite3.Error) as exc:
+            logger.error("Ошибка резервного копирования БД в %s: %s", dest_path, exc)
+            raise BackupError(
+                f"Не удалось создать резервную копию БД: {dest_path}"
+            ) from exc
+        finally:
+            if dst_conn is not None:
+                dst_conn.close()
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+        logger.info(
+            "Резервная копия БД создана: %s (%d байт)",
+            dest_path,
+            dest_path.stat().st_size,
+        )
+
+    def restore_from(self, src_path: Path) -> None:
+        """Восстановление БД из резервной копии src_path.
+
+        Безопасная процедура в два этапа:
+
+        1. **Валидация.** src_path открывается ОТДЕЛЬНЫМ, независимым
+           соединением sqlite3 (см. модульную функцию
+           ``_validate_backup_file()``) и проверяется: PRAGMA
+           integrity_check, наличие таблиц patients/sessions/measurements,
+           user_version > 0. На этом этапе текущая БД (self._conn) не
+           закрывается и не изменяется ни в каком виде — при любой ошибке
+           валидации метод поднимает BackupError, а приложение продолжает
+           работать с прежними данными, как ни в чём не бывало.
+
+        2. **Замена** — только если валидация прошла успешно:
+
+           - текущее соединение закрывается (self.close());
+           - src_path копируется во временный файл РЯДОМ с self.db_path
+             (та же директория — гарантия, что последующий os.replace()
+             будет настоящим atomic rename на одной файловой системе, а не
+             операцией копирования с окном частичной записи);
+           - этот временный файл атомарно подставляется на место
+             self.db_path через os.replace();
+           - осиротевшие файлы ``{db_path}-wal`` и ``{db_path}-shm``,
+             оставшиеся от ПРЕЖНЕЙ БД, удаляются — если этого не сделать,
+             SQLite при следующем открытии обнаружит рядом с новым
+             содержимым db_path чужой WAL-журнал и попытается «доиграть»
+             его поверх только что подставленных данных, что их испортит;
+           - соединение открывается заново через _open() (та же логика,
+             что и в __init__() — WAL, внешние ключи, py_lower(),
+             миграции). Если src_path был БД более старой схемы
+             (user_version меньше текущей версии приложения), миграции
+             доведут её до актуальной версии прямо на этом шаге.
+
+        Если сам этап замены не удался из-за файловой ошибки (нет места
+        на диске, нет прав и т.п.), метод делает наилучшую попытку вернуть
+        рабочее соединение (self.db_path на этот момент либо ещё не
+        тронут, либо — если os.replace() уже успел выполниться — уже
+        содержит данные бэкапа) и в любом случае поднимает BackupError.
+
+        После успешного восстановления self._conn снова валиден и
+        указывает на данные из бэкапа.
+
+        Args:
+            src_path: Путь к файлу резервной копии (обычно созданному
+                backup_to()).
+
+        Raises:
+            BackupError: Если src_path не прошёл валидацию, либо если
+                замена файла БД или последующее открытие соединения
+                завершились ошибкой.
+        """
+        # Запрет восстановления из активной БД: копировался бы только .db без
+        # WAL, а его удаление ниже потеряло бы незачекпойнченные данные.
+        if src_path.resolve() == self.db_path.resolve():
+            raise BackupError("Нельзя восстанавливать из активной базы")
+
+        wal_path = Path(f"{self.db_path}-wal")
+        shm_path = Path(f"{self.db_path}-shm")
+
+        # ── Фаза 1: подготовка (текущая БД цела, соединение открыто) ──────────
+        # Копируем src во временный файл рядом с db_path и валидируем ИМЕННО
+        # копию — те самые байты, что установим (закрывает TOCTOU: src мог
+        # измениться между валидацией и установкой). Любой сбой здесь → старая
+        # БД нетронута.
+        tmp_path: Path | None = None
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=self.db_path.parent,
+                prefix=f".{self.db_path.name}.restore-",
+                suffix=".tmp",
+            )
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            shutil.copyfile(src_path, tmp_path)
+            _validate_backup_file(tmp_path)  # валидируем копию, не оригинал
+        except BackupError:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            logger.error("Ошибка подготовки восстановления из %s: %s", src_path, exc)
+            raise BackupError(
+                f"Не удалось подготовить восстановление БД из: {src_path}"
+            ) from exc
+
+        # ── Фаза 2: замена (точка невозврата — os.replace) ───────────────────
+        # Соединение закрываем как можно позже — прямо перед подменой файла.
+        self.close()
+        try:
+            os.replace(tmp_path, self.db_path)
+        except OSError as exc:
+            # replace не выполнен → старая БД цела, возвращаем соединение.
+            tmp_path.unlink(missing_ok=True)
+            logger.error("Ошибка замены файла БД из %s: %s", src_path, exc)
+            try:
+                self._open()
+            except (OSError, sqlite3.Error):
+                logger.error("Не удалось вернуть соединение после сбоя замены БД")
+            raise BackupError(
+                f"Не удалось восстановить БД из резервной копии: {src_path}"
+            ) from exc
+
+        # ── После os.replace данные УЖЕ заменены: любой сбой → RestoreError ───
+        try:
+            # Осиротевшие WAL/SHM от ПРЕЖНЕЙ БД: без удаления SQLite «доиграет»
+            # их поверх новых данных и испортит.
+            wal_path.unlink(missing_ok=True)
+            shm_path.unlink(missing_ok=True)
+            self._open()
+        except (OSError, sqlite3.Error) as exc:
+            logger.error(
+                "Файл БД заменён данными из %s, но завершить восстановление "
+                "не удалось: %s", src_path, exc,
+            )
+            with contextlib.suppress(OSError, sqlite3.Error):
+                self._open()  # ещё попытка вернуть рабочее соединение
+            raise RestoreError(
+                "База заменена данными из резервной копии, но завершить "
+                "восстановление не удалось. Перезапустите приложение."
+            ) from exc
+
+        logger.info("БД восстановлена из резервной копии: %s", src_path)

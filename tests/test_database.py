@@ -12,16 +12,26 @@
 - Валидация входных данных (пустое имя, недопустимые поля, некорректная
   калибровка)
 - Сортировка выборок (по имени, по дате, по зоне)
+- Резервное копирование и восстановление (backup_to/restore_from): корректность
+  при WAL, безопасность валидации перед заменой файла, защита от осиротевших
+  -wal/-shm, миграция бэкапов старой схемы
 """
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from phototrichogram.data.database import _MIGRATIONS, Database, _split_statements
+from phototrichogram.data.database import (
+    _MIGRATIONS,
+    BackupError,
+    Database,
+    RestoreError,
+    _split_statements,
+)
 
 # ---------------------------------------------------------------------------
 # Вспомогательные фабрики
@@ -1266,3 +1276,421 @@ class TestCreateSessionWithMeasurements:
 
         assert session.id is not None
         assert temp_db.get_session_measurements(session.id) == []
+
+
+# ---------------------------------------------------------------------------
+# Резервное копирование и восстановление: backup_to / restore_from
+# ---------------------------------------------------------------------------
+
+
+class TestBackupTo:
+    """Тесты backup_to() -- атомарное резервное копирование через backup API."""
+
+    def test_creates_nonempty_file(self, temp_db: Database, tmp_path: Path) -> None:
+        """backup_to() создаёт непустой файл резервной копии."""
+        temp_db.add_patient(name="Бэкап Пациент")
+        backup_path = tmp_path / "backup.db"
+
+        temp_db.backup_to(backup_path)
+
+        assert backup_path.is_file()
+        assert backup_path.stat().st_size > 0
+
+    def test_creates_missing_parent_directories(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Недостающие родительские директории dest_path создаются автоматически."""
+        backup_path = tmp_path / "a" / "b" / "c" / "backup.db"
+
+        temp_db.backup_to(backup_path)
+
+        assert backup_path.is_file()
+
+    def test_backup_opens_as_valid_database_with_same_patient(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Бэкап открывается отдельной Database и содержит те же данные."""
+        temp_db.add_patient(name="Иванова А.В.", gender="F")
+        backup_path = tmp_path / "backup.db"
+
+        temp_db.backup_to(backup_path)
+
+        backup_db = Database(backup_path)
+        try:
+            patients = backup_db.get_all_patients()
+            assert len(patients) == 1
+            assert patients[0].name == "Иванова А.В."
+            assert patients[0].gender == "F"
+        finally:
+            backup_db.close()
+
+    def test_backup_file_is_self_contained_without_wal(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Файл бэкапа не в WAL-режиме -- самодостаточный однофайловый .db.
+
+        Без принудительного PRAGMA journal_mode=DELETE после backup() файл
+        унаследовал бы из заголовка исходной БД пометку WAL (backup()
+        копирует и постранично содержимое, включая заголовок), хотя рядом
+        с ним не будет ни -wal, ни -shm файла -- обманчивое полусостояние.
+        """
+        temp_db.add_patient(name="Без WAL")
+        backup_path = tmp_path / "backup.db"
+
+        temp_db.backup_to(backup_path)
+
+        check_conn = sqlite3.connect(str(backup_path))
+        try:
+            mode = check_conn.execute("PRAGMA journal_mode").fetchone()[0]
+            assert mode != "wal"
+        finally:
+            check_conn.close()
+        assert not Path(f"{backup_path}-wal").exists()
+        assert not Path(f"{backup_path}-shm").exists()
+
+    def test_repeated_backup_overwrites_previous_destination_content(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Повторный backup_to() в тот же путь полностью заменяет содержимое."""
+        backup_path = tmp_path / "backup.db"
+        temp_db.add_patient(name="Первый")
+        temp_db.backup_to(backup_path)
+
+        temp_db.add_patient(name="Второй")
+        temp_db.backup_to(backup_path)
+
+        backup_db = Database(backup_path)
+        try:
+            names = {p.name for p in backup_db.get_all_patients()}
+            assert names == {"Первый", "Второй"}
+        finally:
+            backup_db.close()
+
+    def test_backup_captures_data_committed_under_wal(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Данные, закоммиченные в WAL-режиме, но ещё не checkpoint'нутые в
+        основной .db файл, всё равно попадают в бэкап -- это и есть смысл
+        Online Backup API (см. docstring backup_to()): наивное копирование
+        одного лишь .db файла такие данные бы потеряло.
+        """
+        patient = temp_db.add_patient(name="WAL Пациент")
+        cal = temp_db.add_calibration(um_per_px=5.9, fov_width_px=640, fov_height_px=480)
+        session = temp_db.add_session(patient.id, cal.id, "2026-01-01", zone="O")
+        temp_db.save_measurement(session_id=session.id, zone="O", **_measurement_kwargs())
+        backup_path = tmp_path / "backup.db"
+
+        temp_db.backup_to(backup_path)
+
+        backup_db = Database(backup_path)
+        try:
+            patients = backup_db.get_all_patients()
+            assert len(patients) == 1
+            measurements = backup_db.get_patient_measurements(patients[0].id)
+            assert len(measurements) == 1
+            assert measurements[0].hair_count == 100
+            assert measurements[0].zone == "O"
+        finally:
+            backup_db.close()
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root обходит проверку прав доступа файловой системы",
+    )
+    def test_filesystem_error_is_wrapped_as_backup_error(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Ошибка файловой системы (нет прав на запись) оборачивается в BackupError.
+
+        backup_to() документирует, что ЛЮБАЯ ошибка создания бэкапа (нет
+        прав, нет места на диске и т.п.) поднимается именно как
+        BackupError -- единый тип исключения для вызывающего кода (GUI),
+        а не разномастные OSError/sqlite3.Error.
+        """
+        readonly_dir = tmp_path / "readonly"
+        readonly_dir.mkdir()
+        readonly_dir.chmod(0o555)  # r-xr-xr-x -- без права записи
+        backup_path = readonly_dir / "subdir" / "backup.db"
+
+        try:
+            with pytest.raises(BackupError):
+                temp_db.backup_to(backup_path)
+        finally:
+            readonly_dir.chmod(0o755)  # чтобы pytest мог удалить tmp_path
+
+
+class TestRestoreFrom:
+    """Тесты restore_from() -- безопасное восстановление БД из бэкапа."""
+
+    def test_restore_reverts_database_to_backup_state(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """restore_from() возвращает БД к состоянию на момент бэкапа."""
+        temp_db.add_patient(name="Пациент A")
+        backup_path = tmp_path / "backup.db"
+        temp_db.backup_to(backup_path)
+
+        temp_db.add_patient(name="Пациент B")
+        assert {p.name for p in temp_db.get_all_patients()} == {"Пациент A", "Пациент B"}
+
+        temp_db.restore_from(backup_path)
+
+        assert {p.name for p in temp_db.get_all_patients()} == {"Пациент A"}
+
+    def test_restore_keeps_db_path_attribute_unchanged(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """restore_from() подменяет содержимое файла, но не сам self.db_path."""
+        original_path = temp_db.db_path
+        backup_path = tmp_path / "backup.db"
+        temp_db.add_patient(name="Пациент")
+        temp_db.backup_to(backup_path)
+
+        temp_db.restore_from(backup_path)
+
+        assert temp_db.db_path == original_path
+
+    def test_connection_is_usable_after_restore(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """После restore_from() соединение работоспособно -- можно писать дальше."""
+        temp_db.add_patient(name="Пациент A")
+        backup_path = tmp_path / "backup.db"
+        temp_db.backup_to(backup_path)
+
+        temp_db.restore_from(backup_path)
+        new_patient = temp_db.add_patient(name="Новый после restore")
+
+        assert new_patient.id is not None
+        assert temp_db.get_patient(new_patient.id) is not None
+        assert {p.name for p in temp_db.get_all_patients()} == {
+            "Пациент A",
+            "Новый после restore",
+        }
+
+    def test_restore_removes_stale_foreign_wal_preventing_data_mixing(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Осиротевший ВАЛИДНЫЙ -wal чужой БД не подмешивается в восстановленные данные.
+
+        Без явного удаления {db_path}-wal/{db_path}-shm внутри restore_from()
+        SQLite может обнаружить рядом со свежеподставленным файлом БД чужой
+        WAL-журнал (валидный по структуре, но принадлежащий совершенно
+        другому поколению данных) и «доиграть» его поверх при следующем
+        открытии, вернув чужое/устаревшее содержимое вместо только что
+        восстановленного бэкапа. Тест воспроизводит именно эту опасность:
+        подкладывает валидный, но полностью посторонний WAL-файл на место
+        {db_path}-wal перед вызовом restore_from() и проверяет, что он не
+        просочился в итоговые данные.
+        """
+        temp_db.add_patient(name="Пациент A")
+        backup_path = tmp_path / "backup.db"
+        temp_db.backup_to(backup_path)
+
+        # Совершенно отдельная БД -- источник ВАЛИДНОГО, но постороннего
+        # WAL-журнала (тот же приём, что и у настоящей БД: WAL-режим,
+        # запись, закоммиченная на уровне транзакции, но ещё физически
+        # лежащая в -wal, не в основном файле).
+        foreign_path = tmp_path / "foreign.db"
+        foreign_conn = sqlite3.connect(str(foreign_path))
+        foreign_conn.execute("PRAGMA journal_mode=WAL")
+        foreign_conn.execute("CREATE TABLE patients (id INTEGER PRIMARY KEY, name TEXT)")
+        foreign_conn.execute("INSERT INTO patients (name) VALUES ('Чужой Пациент')")
+        foreign_conn.commit()
+        foreign_wal_bytes = Path(f"{foreign_path}-wal").read_bytes()
+        foreign_conn.close()
+
+        db_path = temp_db.db_path
+        temp_db.close()
+        # Имитация осиротевшего WAL от старой БД, не убранного при закрытии
+        # (например, из-за аварийного завершения предыдущего процесса).
+        Path(f"{db_path}-wal").write_bytes(foreign_wal_bytes)
+
+        temp_db.restore_from(backup_path)
+
+        assert {p.name for p in temp_db.get_all_patients()} == {"Пациент A"}
+        # И соединение по-прежнему рабочее.
+        temp_db.add_patient(name="Контрольная запись")
+        assert len(temp_db.get_all_patients()) == 2
+
+    def test_restore_from_legacy_v10_schema_migrates_to_current(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Восстановление из бэкапа со схемой v10 (без measurement_images)
+        доводит БД до текущей версии схемы (11), данные из бэкапа целы.
+
+        Схема бэкапа воспроизводится вручную из миграций 1..10, как и в
+        TestMigrations.test_legacy_db_without_measurement_images_table_is_migrated
+        -- имитация бэкапа, снятого более старой версией приложения.
+        """
+        temp_db.add_patient(name="Текущий пациент до restore")
+        legacy_path = tmp_path / "legacy_v10_backup.db"
+
+        raw = sqlite3.connect(str(legacy_path))
+        try:
+            for version, sql in _MIGRATIONS:
+                if version >= 11:
+                    continue
+                for statement in _split_statements(sql):
+                    raw.execute(statement)
+            raw.execute(
+                "INSERT INTO patients (name, gender) VALUES (?, ?)",
+                ("Легаси Пациент", "F"),
+            )
+            raw.execute(
+                "INSERT INTO calibrations "
+                "(um_per_px, fov_width_px, fov_height_px, "
+                " fov_width_mm, fov_height_mm, fov_area_mm2) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (5.9, 640, 480, 3.776, 2.832, 10.694),
+            )
+            raw.execute(
+                "INSERT INTO sessions (patient_id, calibration_id, date) VALUES (?, ?, ?)",
+                (1, 1, "2026-01-01"),
+            )
+            raw.execute(
+                "INSERT INTO measurements (session_id, zone, hair_count, density_per_cm2) "
+                "VALUES (?, ?, ?, ?)",
+                (1, "F", 120, 210.5),
+            )
+            raw.commit()
+            raw.execute("PRAGMA user_version=10")
+            raw.commit()
+        finally:
+            raw.close()
+
+        temp_db.restore_from(legacy_path)
+
+        version = temp_db._conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 11
+
+        patients = temp_db.get_all_patients()
+        assert len(patients) == 1
+        assert patients[0].name == "Легаси Пациент"
+
+        measurements = temp_db.get_session_measurements(1)
+        assert len(measurements) == 1
+        assert measurements[0].hair_count == 120
+        assert measurements[0].n_snapshots == 1
+        assert measurements[0].density_std is None
+
+        tables = {
+            row["name"]
+            for row in temp_db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "measurement_images" in tables
+
+    def test_restore_from_nonexistent_file_raises_without_creating_it(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Несуществующий src_path -- BackupError, файл при этом не создаётся.
+
+        sqlite3.connect() на несуществующем пути создал бы там пустой файл
+        БД -- _validate_backup_file() обязана проверить существование ДО
+        открытия соединения, иначе на диске появлялся бы паразитный файл.
+        """
+        missing_path = tmp_path / "does_not_exist.db"
+
+        with pytest.raises(BackupError):
+            temp_db.restore_from(missing_path)
+
+        assert not missing_path.exists()
+
+    def test_restore_from_garbage_file_raises_and_current_db_stays_intact(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Восстановление из текстового мусора -- BackupError, текущая БД цела и рабочая."""
+        temp_db.add_patient(name="Нетронутый Пациент")
+        garbage_path = tmp_path / "garbage.db"
+        garbage_path.write_text("это не файл SQLite, просто текст\n" * 5)
+
+        with pytest.raises(BackupError):
+            temp_db.restore_from(garbage_path)
+
+        patients = temp_db.get_all_patients()
+        assert len(patients) == 1
+        assert patients[0].name == "Нетронутый Пациент"
+        # Соединение по-прежнему рабочее -- сбой валидации не оставил его закрытым.
+        temp_db.add_patient(name="Ещё один после сбоя валидации")
+        assert len(temp_db.get_all_patients()) == 2
+
+    def test_restore_from_db_without_required_tables_raises(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Валидный SQLite-файл без таблиц приложения -- BackupError.
+
+        Проверяет ветку валидации "структурно исправный SQLite, но не БД
+        этого приложения" -- отдельно от "файл повреждён/не SQLite вообще".
+        """
+        temp_db.add_patient(name="Нетронутый Пациент 2")
+        unrelated_path = tmp_path / "unrelated_schema.db"
+        raw = sqlite3.connect(str(unrelated_path))
+        raw.execute("CREATE TABLE unrelated (id INTEGER)")
+        raw.execute("PRAGMA user_version=1")
+        raw.commit()
+        raw.close()
+
+        with pytest.raises(BackupError):
+            temp_db.restore_from(unrelated_path)
+
+        assert len(temp_db.get_all_patients()) == 1
+
+    def test_restore_from_empty_file_raises(self, temp_db: Database, tmp_path: Path) -> None:
+        """0-байтовый файл -- валиден как пустая SQLite БД (integrity_check 'ok'),
+        но без таблиц и с user_version=0 -- отклоняется как БД приложения.
+        """
+        empty_path = tmp_path / "empty.db"
+        empty_path.write_bytes(b"")
+
+        with pytest.raises(BackupError):
+            temp_db.restore_from(empty_path)
+
+
+class TestBackupRestorePathGuards:
+    """Запреты бэкапа/восстановления поверх активной БД и различение ошибок."""
+
+    def test_backup_to_active_db_path_raises(self, temp_db: Database) -> None:
+        """backup_to поверх активной БД → BackupError (не порча живого файла)."""
+        temp_db.add_patient(name="Целевой")
+        with pytest.raises(BackupError, match="поверх активной"):
+            temp_db.backup_to(temp_db.db_path)
+        # БД цела и работоспособна.
+        assert {p.name for p in temp_db.get_all_patients()} == {"Целевой"}
+
+    def test_restore_from_active_db_path_raises(self, temp_db: Database) -> None:
+        """restore_from из активной БД → BackupError, данные целы."""
+        temp_db.add_patient(name="Целевой")
+        with pytest.raises(BackupError, match="из активной"):
+            temp_db.restore_from(temp_db.db_path)
+        assert {p.name for p in temp_db.get_all_patients()} == {"Целевой"}
+
+    def test_backup_over_existing_file_leaves_valid_backup(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """Повторный backup_to в тот же путь оставляет валидную актуальную копию."""
+        backup_path = tmp_path / "b.db"
+        temp_db.add_patient(name="Первый")
+        temp_db.backup_to(backup_path)
+        temp_db.add_patient(name="Второй")
+        temp_db.backup_to(backup_path)  # temp→rename, старую копию не бьёт при сбое
+
+        with Database(backup_path) as restored:
+            assert {p.name for p in restored.get_all_patients()} == {"Первый", "Второй"}
+
+    def test_connection_usable_after_restore(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """После успешного restore соединение рабочее (можно писать)."""
+        temp_db.add_patient(name="A")
+        backup_path = tmp_path / "b.db"
+        temp_db.backup_to(backup_path)
+        temp_db.restore_from(backup_path)
+        # Соединение переоткрыто и работает.
+        temp_db.add_patient(name="B")
+        assert {p.name for p in temp_db.get_all_patients()} == {"A", "B"}
+
+    def test_restore_error_is_backup_error_subclass(self) -> None:
+        """RestoreError — подкласс BackupError (GUI ловит RestoreError раньше)."""
+        assert issubclass(RestoreError, BackupError)

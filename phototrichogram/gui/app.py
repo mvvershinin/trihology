@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from phototrichogram.data.database import Database
+from phototrichogram.data.database import BackupError, Database, RestoreError
 from phototrichogram.data.models import Patient
 from phototrichogram.gui.widgets import StatusBar
 
@@ -222,6 +223,15 @@ class App(tk.Tk):
         )
         file_menu.add_separator()
         file_menu.add_command(
+            label="Резервная копия базы...",
+            command=self._on_backup_db,
+        )
+        file_menu.add_command(
+            label="Восстановить из копии...",
+            command=self._on_restore_db,
+        )
+        file_menu.add_separator()
+        file_menu.add_command(
             label="Выход",
             accelerator="Ctrl+Q",
             command=self._on_close,
@@ -402,6 +412,144 @@ class App(tk.Tk):
             current_tab.save_result()
         else:
             self._status_bar.set_text("Нет данных для сохранения")
+
+    def _on_backup_db(self) -> None:
+        """Создать резервную копию БД в выбранный пользователем файл.
+
+        Диалог сохранения предлагает имя с текущей датой/временем и
+        открывается в папке отчётов (или домашней, если она не задана либо
+        не существует). Ошибку резервного копирования (BackupError) показывает
+        в диалоге и статусбаре, не прерывая работу приложения.
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        default_name = f"phototrichogram_backup_{timestamp}.db"
+
+        reports_dir = self._config.app.reports_dir
+        initialdir = (
+            reports_dir if reports_dir and Path(reports_dir).is_dir() else str(Path.home())
+        )
+
+        path = filedialog.asksaveasfilename(
+            title="Резервная копия базы",
+            defaultextension=".db",
+            initialfile=default_name,
+            initialdir=initialdir,
+            filetypes=[("База данных", "*.db"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            self._db.backup_to(Path(path))
+        except BackupError as e:
+            logger.error("Ошибка резервного копирования БД в %s: %s", path, e)
+            self._status_bar.set_error("Не удалось создать резервную копию")
+            messagebox.showerror(
+                "Резервная копия",
+                f"Не удалось создать резервную копию:\n{e}",
+            )
+            return
+
+        self._status_bar.set_ready(f"Резервная копия сохранена: {path}")
+        logger.info("Резервная копия БД сохранена: %s", path)
+        messagebox.showinfo("Резервная копия", f"База сохранена:\n{path}")
+
+    def _on_restore_db(self) -> None:
+        """Восстановить БД из резервной копии (деструктивная операция).
+
+        Перед выбором файла запрашивает подтверждение — восстановление
+        безвозвратно заменяет текущие данные. Выбранный файл валидируется
+        data-слоем (Database.restore_from) ДО замены: при некорректном файле
+        текущая БД не повреждается, показывается ошибка, приложение не падает.
+        После успешного восстановления активный пациент сбрасывается (его может
+        не быть в новой БД), а вкладки, читающие БД, перечитываются
+        (см. _reload_db_tabs), чтобы в UI не осталось устаревших данных.
+        """
+        confirm = messagebox.askyesno(
+            "Восстановление базы",
+            "Текущие данные будут ЗАМЕНЕНЫ данными из резервной копии.\n\n"
+            "Это действие необратимо. Продолжить?",
+        )
+        if not confirm:
+            return
+
+        reports_dir = self._config.app.reports_dir
+        initialdir = (
+            reports_dir if reports_dir and Path(reports_dir).is_dir() else str(Path.home())
+        )
+
+        path = filedialog.askopenfilename(
+            title="Восстановить из копии",
+            initialdir=initialdir,
+            filetypes=[("База данных", "*.db"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            self._db.restore_from(Path(path))
+        except RestoreError as e:
+            # Файл БД уже заменён, но восстановление не завершилось — состояние
+            # неопределённо, «данные сохранены» было бы ложью.
+            logger.error("Восстановление прервано после замены БД из %s: %s", path, e)
+            self._status_bar.set_error("Восстановление прервано")
+            messagebox.showerror(
+                "Восстановление прервано",
+                f"База могла быть частично заменена:\n{e}\n\n"
+                "Перезапустите приложение.",
+            )
+            return
+        except BackupError as e:
+            # Замена не начиналась — текущие данные целы (по контракту API).
+            logger.error("Ошибка восстановления БД из %s: %s", path, e)
+            self._status_bar.set_error("Восстановление не удалось")
+            messagebox.showerror(
+                "Восстановление не удалось",
+                f"Файл не является корректной резервной копией:\n{e}\n\n"
+                "Текущие данные сохранены.",
+            )
+            return
+
+        # Соединение уже переоткрыто на данные бэкапа. Активный пациент старой БД
+        # мог не сохраниться в восстановленной (или его id указывать на другого
+        # пациента) → сброс: setter обновит статусбар и конфиг. Затем перечитываем
+        # вкладки, чтобы в UI не осталось записей со старыми id.
+        self.active_patient = None
+        self._reload_db_tabs()
+
+        self._status_bar.set_ready(f"База восстановлена из копии: {path}")
+        logger.info("БД восстановлена из копии: %s", path)
+        messagebox.showinfo("Восстановление", f"База восстановлена из копии:\n{path}")
+
+    def _reload_db_tabs(self) -> None:
+        """Перечитать вкладки, читающие БД, после восстановления из копии.
+
+        Вызывается из _on_restore_db, когда соединение уже указывает на данные
+        бэкапа, но вкладки ещё показывают прежние записи и держат ссылки на
+        объекты (карточка пациента, список, история), которых в новой БД может
+        не быть. Карточка пациента очищается (сбрасывается устаревший выбранный
+        пациент — иначе «Удалить»/«Сохранить» сработали бы по чужому id
+        восстановленной БД), список пациентов и история перечитываются из БД.
+        Методы вызываются через hasattr: если вкладка не загрузилась (заглушка),
+        шаг безопасно пропускается.
+        """
+        patients_tab = self._tabs.get("patients")
+        if patients_tab is not None and hasattr(patients_tab, "_on_clear_form"):
+            patients_tab._on_clear_form()
+        if patients_tab is not None and hasattr(patients_tab, "_refresh_list"):
+            patients_tab._refresh_list()
+
+        history_tab = self._tabs.get("history")
+        if history_tab is not None and hasattr(history_tab, "refresh"):
+            history_tab.refresh()
+
+        # Вкладка «Результаты» держит в памяти результаты и id сессии СТАРОЙ БД.
+        # После восстановления id могут указывать на чужие сессии новой БД
+        # (SQLite перезапускает автоинкремент для каждого файла) — сбрасываем,
+        # иначе экспорт PDF выгрузил бы данные, не соответствующие пациенту.
+        results_tab = self._tabs.get("results")
+        if results_tab is not None and hasattr(results_tab, "load_results"):
+            results_tab.load_results({}, None)
 
     def _on_goto_calibration(self) -> None:
         """Переключение на вкладку калибровки."""

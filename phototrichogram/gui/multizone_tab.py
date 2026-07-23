@@ -688,7 +688,8 @@ class MultizoneTab(ttk.Frame):
         if report_data is None:
             messagebox.showwarning(
                 "Экспорт в PDF",
-                "Не удалось загрузить сохранённую сессию для отчёта.",
+                "Показанные результаты не соответствуют выбранному пациенту\n"
+                "(например, после восстановления базы). Выполните анализ заново.",
                 parent=self,
             )
             return
@@ -759,6 +760,16 @@ class MultizoneTab(ttk.Frame):
         db = self._app.db
         session = db.get_session(session_id)
         if session is None:
+            return None
+        # Страховка: сессия должна принадлежать активному пациенту. После
+        # восстановления БД id сессии мог «переехать» на чужого пациента
+        # (автоинкремент SQLite перезапускается для каждого файла) — не даём
+        # выгрузить чужие измерения под именем этого пациента.
+        if patient.id is None or session.patient_id != patient.id:
+            logger.warning(
+                "Сессия id=%d не принадлежит пациенту id=%s — экспорт отклонён",
+                session_id, patient.id,
+            )
             return None
 
         measurements = db.get_session_measurements(session_id)

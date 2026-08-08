@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import cv2
 import numpy as np
 import pytest
@@ -396,32 +398,43 @@ class TestBundledFonts:
 
 
 # ---------------------------------------------------------------------------
-# Режим подсчёта: count_mode = "all" (дефолт) vs "rooted"
+# Режим подсчёта: count_mode = "rooted" (дефолт) vs "all"
 # ---------------------------------------------------------------------------
 
 
 class TestCountMode:
     """Переключаемый режим подсчёта волос «от корней» (план v1.4, Phase 1)."""
 
-    def test_default_count_mode_is_all(self) -> None:
-        """Дефолт count_mode == 'all' — прежнее поведение не меняется."""
-        assert AnalysisConfig().count_mode == "all"
+    def test_default_count_mode_is_rooted(self) -> None:
+        """Дефолт count_mode == 'rooted' — транзитные волосы не считаются."""
+        assert AnalysisConfig().count_mode == "rooted"
+
+    def test_default_config_excludes_transit(self) -> None:
+        """Дефолтный конфиг применяет фильтр корней: транзитный волос не в счёте.
+
+        Страхует сам дефолт: если его случайно вернут на 'all', тест упадёт.
+        """
+        result = Analyzer(AnalysisConfig()).analyze(_transit_image())
+
+        assert result is not None
+        assert result.hair_count == 1
 
     def test_all_mode_matches_pipeline_without_rooting(
         self, sample_image: np.ndarray, default_config: AnalysisConfig
     ) -> None:
         """Регрессия: в режиме 'all' счёт равен пайплайну БЕЗ фильтра корней.
 
-        Доказывает, что при дефолтном count_mode='all' детекция корней не
-        применяется — результат идентичен «сегментация → контуры → измерение →
-        фильтр пучков», как было до появления режима.
+        Доказывает, что при count_mode='all' детекция корней не применяется —
+        результат идентичен «сегментация → контуры → измерение → фильтр
+        пучков», как было до появления режима.
         """
-        result = Analyzer(default_config).analyze(sample_image)
+        config = replace(default_config, count_mode="all")
+        result = Analyzer(config).analyze(sample_image)
 
-        mask = segment_hair(sample_image, default_config)
-        contours = find_hair_contours(mask, default_config)
-        measurements = measure_all(contours, default_config)
-        measurements, _ = split_thick_bundles(measurements, default_config)
+        mask = segment_hair(sample_image, config)
+        contours = find_hair_contours(mask, config)
+        measurements = measure_all(contours, config)
+        measurements, _ = split_thick_bundles(measurements, config)
 
         assert result is not None
         assert result.hair_count == len(measurements)
@@ -489,7 +502,11 @@ class TestCountMode:
     def test_unknown_count_mode_behaves_like_all(
         self, sample_image: np.ndarray
     ) -> None:
-        """Неизвестное значение count_mode не включает фильтр (безопасный дефолт)."""
+        """Неизвестное значение count_mode не включает фильтр корней.
+
+        Анализатор реагирует только на точную строку 'rooted'; от опечаток в
+        файле конфига защищает валидация в ``load_config`` (откат на дефолт).
+        """
         all_result = Analyzer(AnalysisConfig(count_mode="all")).analyze(sample_image)
         weird_result = Analyzer(AnalysisConfig(count_mode="whatever")).analyze(sample_image)
 

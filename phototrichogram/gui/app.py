@@ -817,9 +817,9 @@ class _SettingsDialog(tk.Toplevel):
     def _add_count_mode(self, parent: ttk.Widget) -> None:
         """Секция выбора режима подсчёта волос (count_mode).
 
-        Радиокнопки «Все волосы» = ``all`` (дефолт, прежнее поведение) и
-        «Только растущие» = ``rooted`` (не считает волосы, проходящие через
-        кадр насквозь). StringVar регистрируется в ``self._vars`` под ключом
+        Радиокнопки «Только растущие» = ``rooted`` (дефолт: не считает волосы,
+        проходящие через кадр насквозь) и «Все волосы» = ``all`` (поведение до
+        v1.5). StringVar регистрируется в ``self._vars`` под ключом
         ``count_mode`` — значит, generic ``_load_values`` / ``_on_save``
         подхватят его как остальные параметры (загрузка из конфига и сохранение
         в него без спец-обработки).
@@ -835,22 +835,24 @@ class _SettingsDialog(tk.Toplevel):
 
         ttk.Radiobutton(
             count_frame,
-            text="Все волосы (как есть)",
+            text="Только растущие, от корней (по умолчанию)",
             variable=count_var,
-            value="all",
+            value="rooted",
         ).grid(row=0, column=0, sticky="w", padx=5, pady=1)
         ttk.Radiobutton(
             count_frame,
-            text="Только растущие (от корней)",
+            text="Все волосы (как есть)",
             variable=count_var,
-            value="rooted",
+            value="all",
         ).grid(row=1, column=0, sticky="w", padx=5, pady=1)
 
         ttk.Label(
             count_frame,
             text=(
                 "«Только растущие» не считает волосы, проходящие через кадр "
-                "насквозь (растущие вне участка)."
+                "насквозь (растущие вне участка). Плотность выходит ниже, чем "
+                "в режиме «Все волосы»: снимки, посчитанные в разных режимах, "
+                "между собой не сравнивают."
             ),
             font=("", 8),
             foreground="#757575",

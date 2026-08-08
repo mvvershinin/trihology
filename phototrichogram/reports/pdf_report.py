@@ -505,6 +505,35 @@ def _colored_runs(
     pdf.ln(5)
 
 
+def _format_norm_ranges(norms: PatientNorms) -> tuple[str, str]:
+    """Две строки референсных норм: пороги и справочные верхние значения.
+
+    Плотность, толщина и T/V ориентированы «больше — лучше»: по
+    ``NormRange.status`` нормой считается всё от ``low`` и выше, превышение
+    ``high`` отклонением не является. Поэтому пороги записаны как ``≥low``,
+    а ``high`` вынесено во вторую строку как справочное «типично до» — прежняя
+    запись диапазоном ``low–high`` читалась как потолок нормы.
+
+    Args:
+        norms: Персональные референсные нормы пациента.
+
+    Returns:
+        Кортеж (строка порогов, строка типичных верхних значений).
+    """
+    d, t, v, tv = norms.density, norms.thickness_um, norms.vellus_pct, norms.tv_ratio
+    thresholds = (
+        f"Плотность ≥{d.low:.0f}/см²   ·   "
+        f"Толщина ≥{t.low:.0f} мкм   ·   "
+        f"Vellus ≤{v.high:.0f}%   ·   "
+        f"T/V ≥{tv.low:.0f}"
+    )
+    typical = (
+        f"Типичные верхние значения (не потолок нормы): "
+        f"плотность до {d.high:.0f}/см², толщина до {t.high:.0f} мкм."
+    )
+    return thresholds, typical
+
+
 def _draw_norms_block(pdf: FPDF, fam: str, norms: PatientNorms) -> None:
     """Строка референсных норм пациента и легенда цветов статуса."""
     _section_title(pdf, fam, "Референсные нормы")
@@ -515,16 +544,15 @@ def _draw_norms_block(pdf: FPDF, fam: str, norms: PatientNorms) -> None:
         new_x=XPos.LMARGIN, new_y=YPos.NEXT,
     )
 
-    d, t, v, tv = norms.density, norms.thickness_um, norms.vellus_pct, norms.tv_ratio
-    ranges = (
-        f"Плотность {d.low:.0f}–{d.high:.0f}/см²   ·   "
-        f"Толщина {t.low:.0f}–{t.high:.0f} мкм   ·   "
-        f"Vellus ≤{v.high:.0f}%   ·   "
-        f"T/V ≥{tv.low:.0f}"
-    )
+    thresholds, typical = _format_norm_ranges(norms)
     pdf.set_font(fam, "", 9)
     pdf.set_text_color(*_BLACK)
-    pdf.multi_cell(0, 5, ranges, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.multi_cell(0, 5, thresholds, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    pdf.set_font(fam, "", 8)
+    pdf.set_text_color(*_GRAY)
+    pdf.multi_cell(0, 4, typical, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_text_color(*_BLACK)
 
     # Легенда: каждое слово окрашено в цвет соответствующего статуса.
     _colored_runs(

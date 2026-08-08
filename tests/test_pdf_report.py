@@ -23,6 +23,8 @@ generate_report не падает на отсутствующих/неполны
   output_path, разные демографии пациента (этнос/возраст/пол)
 - format_tv_ratio: «нет пушковых» на границе и выше TV_RATIO_MAX,
   обычное значение, число чуть ниже границы
+- _format_norm_ranges: пороги «больше=лучше» записаны как ≥low, vellus — как
+  ≤high, верхние значения вынесены в справочную строку и не читаются потолком
 """
 
 from __future__ import annotations
@@ -33,10 +35,15 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from phototrichogram.core.norms import PatientNorms, select_norms
+from phototrichogram.core.norms import NormStatus, PatientNorms, select_norms
 from phototrichogram.core.stats import TV_RATIO_MAX
 from phototrichogram.data.models import Calibration, Measurement, Patient
-from phototrichogram.reports.pdf_report import ReportData, format_tv_ratio, generate_report
+from phototrichogram.reports.pdf_report import (
+    ReportData,
+    _format_norm_ranges,
+    format_tv_ratio,
+    generate_report,
+)
 
 # Дата отчёта фиксирована (не datetime.now()) — детерминизм (см. докстринг модуля).
 _TODAY_ISO = "2026-07-19"
@@ -643,3 +650,56 @@ class TestControlZoneColoring:
         output_path = tmp_path / "noncontrol_low.pdf"
         generate_report(data, output_path)
         _assert_valid_pdf(output_path)
+
+
+# ---------------------------------------------------------------------------
+# Формулировка референсных норм в отчёте
+# ---------------------------------------------------------------------------
+
+
+class TestFormatNormRanges:
+    """Строки блока «Референсные нормы»: пороги и справочные верхние значения.
+
+    Плотность/толщина/T/V — «больше значит лучше»: превышение ``high`` нормой
+    остаётся (``NormRange.status``). Отчёт не должен подавать ``high`` как
+    потолок нормы.
+    """
+
+    def test_thresholds_use_lower_bound_for_higher_is_better(self) -> None:
+        """Плотность, толщина и T/V записаны как «≥нижняя граница»."""
+        norms = _default_norms()
+        thresholds, _ = _format_norm_ranges(norms)
+
+        assert f"Плотность ≥{norms.density.low:.0f}/см²" in thresholds
+        assert f"Толщина ≥{norms.thickness_um.low:.0f} мкм" in thresholds
+        assert f"T/V ≥{norms.tv_ratio.low:.0f}" in thresholds
+
+    def test_thresholds_keep_upper_bound_for_vellus(self) -> None:
+        """Vellus — «меньше значит лучше», порог остаётся верхним (≤high)."""
+        norms = _default_norms()
+        thresholds, _ = _format_norm_ranges(norms)
+
+        assert f"Vellus ≤{norms.vellus_pct.high:.0f}%" in thresholds
+
+    def test_thresholds_do_not_read_as_closed_range(self) -> None:
+        """В строке порогов нет записи «low–high» — она читалась как потолок."""
+        norms = _default_norms()
+        thresholds, _ = _format_norm_ranges(norms)
+
+        assert f"{norms.density.low:.0f}–{norms.density.high:.0f}" not in thresholds
+        assert f"{norms.thickness_um.low:.0f}–{norms.thickness_um.high:.0f}" not in thresholds
+
+    def test_typical_line_marks_upper_values_as_reference(self) -> None:
+        """Верхние значения вынесены отдельно и явно помечены «не потолок»."""
+        norms = _default_norms()
+        _, typical = _format_norm_ranges(norms)
+
+        assert "не потолок нормы" in typical
+        assert f"плотность до {norms.density.high:.0f}/см²" in typical
+        assert f"толщина до {norms.thickness_um.high:.0f} мкм" in typical
+
+    def test_density_above_high_is_still_normal(self) -> None:
+        """Смысловая страховка: значение выше high — норма, подпись не врёт."""
+        norms = _default_norms()
+
+        assert norms.density.status(norms.density.high + 50.0) is NormStatus.NORMAL

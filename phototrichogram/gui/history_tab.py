@@ -76,6 +76,9 @@ _ZONE_ORDER: tuple[str, ...] = ("F", "P", "T", "O")
 _NORM_COLOR: str = "#4CAF50"
 _NORM_ALPHA: float = 0.10
 
+# Справочная линия «типичная верхняя граница» — не порог, поэтому серый пунктир
+_TYPICAL_TOP_COLOR: str = "#9E9E9E"
+
 # Радиус «прицеливания» по точке при клике (в пикселях экрана)
 _PICK_RADIUS_PX: float = 20.0
 
@@ -516,6 +519,12 @@ class HistoryTab(ttk.Frame):
     def _finalize_density_axis(self, norms: PatientNorms, all_dates: list[str]) -> None:
         """Оформить ось плотности: полоса нормы, автомасштаб, подписи.
 
+        Полоса нормы открыта вверх (от ``low`` до верха оси), как и у T/V:
+        ``NormRange.status`` для плотности считает нормой любое значение от
+        ``low`` и выше — густые волосы не отклонение. Прежняя полоса ``low..high``
+        читалась как потолок нормы и вводила в заблуждение. Значение ``high``
+        осталось справочной серой пунктирной линией «типично до».
+
         Args:
             norms: Персональные нормы пациента.
             all_dates: Общий отсортированный список дат (для оси X).
@@ -528,12 +537,19 @@ class HistoryTab(ttk.Frame):
         lo = min([*dens_vals, low])
         hi = max([*dens_vals, high])
         pad = max((hi - lo) * 0.08, 5.0)
-        ax.set_ylim(max(0.0, lo - pad), hi + pad)
+        y_top = hi + pad
+        ax.set_ylim(max(0.0, lo - pad), y_top)
 
         ax.axhspan(
-            low, high,
+            low, y_top,
             color=_NORM_COLOR, alpha=_NORM_ALPHA, zorder=0,
             label=f"норма: {norms.basis}",
+        )
+        ax.axhline(low, color=_NORM_COLOR, linestyle="--", linewidth=0.9, alpha=0.7)
+        ax.axhline(
+            high,
+            color=_TYPICAL_TOP_COLOR, linestyle=":", linewidth=0.9, alpha=0.8,
+            label=f"типично до {high:.0f}",
         )
 
         self._apply_date_axis(ax, all_dates)

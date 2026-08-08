@@ -1036,25 +1036,24 @@ FOV_AREA_MM2 = (width * new_um_per_px / 1000) * (height * new_um_per_px / 1000)
 
 ## 8. Сборка и распространение
 
-### 8.1 PyInstaller (один файл)
+### 8.1 Linux — PyInstaller (каталог, режим onedir)
+
+Параметры сборки заданы в `build.spec` (там же обоснование каждого
+`hiddenimports` и `excludes`), а не флагами командной строки:
 
 ```bash
-# Установка
-pip install pyinstaller
-
-# Сборка
-pyinstaller --onefile \
-    --name phototrichogram \
-    --windowed \
-    --add-data "assets:assets" \
-    --hidden-import cv2 \
-    --hidden-import numpy \
-    --hidden-import matplotlib \
-    --hidden-import reportlab \
-    main.py
+source .venv/bin/activate
+pip install -r requirements-dev.txt   # добавляет pyinstaller
+pyinstaller build.spec --noconfirm
 ```
 
-Результат: `dist/phototrichogram` (~80 МБ), запуск: `./phototrichogram`
+Результат: каталог `dist/phototrichogram/` (~280 МБ) с исполняемым файлом
+внутри. Режим `--onefile` не используется: он распаковывает себя во временный
+каталог при каждом запуске (медленный старт), а для конечного пользователя
+единым файлом и так является AppImage.
+
+Тот же `build.spec` собирает и под Windows, если запускать его на Windows:
+`console` и формат иконки подставляются по системе.
 
 ### 8.2 AppImage
 
@@ -1073,6 +1072,24 @@ ARCH=x86_64 appimagetool Phototrichogram.AppDir
 ```
 
 Результат: `Phototrichogram-x86_64.AppImage`, запуск: `chmod +x ... && ./...`
+
+### 8.2a Windows — переносимый пакет (собирается на Linux)
+
+PyInstaller кросс-сборки не умеет: `.exe` под Windows он делает только на
+Windows. Поэтому Windows-пакет собирается иначе — складыванием готовых
+Windows-бинарников, без единой строчки компиляции:
+
+```bash
+python tools/build_windows_package.py --out dist/windows
+```
+
+Внутрь кладутся: Windows-Python из conda-forge (в этой сборке есть tkinter,
+tcl/tk и SQLite), Windows-колёса библиотек с PyPI, исходники и пусковик.
+Результат: `Phototrichogram-win64.zip` (~122 МБ) — распаковал и запустил,
+устанавливать пользователю нечего, включая SQLite и библиотеки Visual C++.
+
+Полное описание, разбор зависимостей и известные грабли (поиск библиотек на
+Windows начиная с Python 3.8) — в `docs/BUILD_WINDOWS.md`.
 
 ### 8.3 Права USB
 

@@ -16,9 +16,16 @@
 
 ## Требования
 
+**Для разработки (Linux):**
+
 - Linux (Ubuntu/Debian)
 - Python 3.11+
 - USB-микроскоп (UVC-совместимый)
+
+**Для готового Windows-пакета:** ничего устанавливать не нужно — ни Python, ни
+библиотек, ни SQLite, ни прав администратора. Windows 10/11 64-бит, ~350 МБ на
+диске, UVC-микроскоп (драйвер в Windows встроенный). См.
+[docs/BUILD_WINDOWS.md](docs/BUILD_WINDOWS.md).
 
 ## Установка
 
@@ -51,6 +58,8 @@ python -m phototrichogram
 
 ## Сборка
 
+### Linux
+
 Standalone-дистрибутив (PyInstaller, режим onedir):
 
 ```bash
@@ -67,6 +76,22 @@ AppImage (нужен `appimagetool` в PATH — не устанавливает�
 ```bash
 bash build-appimage.sh
 ```
+
+### Windows
+
+Собирается **на Linux**, Windows-машина не нужна:
+
+```bash
+python tools/build_windows_package.py --out dist/windows
+```
+
+Результат — `dist/windows/Phototrichogram-win64.zip` (~122 МБ): распаковал и
+запустил, устанавливать нечего. PyInstaller здесь неприменим — он пакует
+интерпретатор той системы, где запущен; скрипт вместо этого складывает готовые
+Windows-бинарники (Python из conda-forge с tkinter и SQLite + колёса win_amd64).
+
+Подробности, разбор зависимостей и разбор проблем:
+[docs/BUILD_WINDOWS.md](docs/BUILD_WINDOWS.md)
 
 ## Стек
 

@@ -92,7 +92,8 @@
       наличии, подсказки по установке пакетов по системе.
    ✅ Фаза 3: build.spec собирает под обе системы, иконка .ico.
    ✅ Фаза 5: готовый пакет собирается на Linux —
-      `tools/build_windows_package.py` → `Phototrichogram-win64.zip` (127 МБ).
+      `tools/build_windows_package.py` → `Phototrichogram-win64.zip` (122 МБ).
+      Документация сборки и зависимостей: `docs/BUILD_WINDOWS.md`.
       Внутри Windows-Python с tkinter и SQLite + Windows-колёса. Инструкция
       «ЧИТАТЬ-СНАЧАЛА.txt» с предупреждением про SmartScreen внутри пакета.
    ⬜ Фаза 4: запустить пакет на Windows и проверить микроскоп — только

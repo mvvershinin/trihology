@@ -12,15 +12,18 @@ Windows-колёса библиотек с PyPI. Ни одной строчки 
 запускает ярлыком. Устанавливать не нужно ничего — ни Python, ни библиотеки,
 ни СУБД (SQLite живёт внутри Python отдельной установки не требует).
 
-Требования к машине сборки: Linux, интернет, python3 с модулем zstandard.
-Права администратора НЕ нужны — micromamba скачивается как обычный файл.
+Требования к машине сборки: Linux x86-64, python3 с pip, интернет, ~1.5 ГБ
+свободного места. Ни Windows, ни Wine, ни прав администратора не нужно —
+micromamba скачивается как обычный файл в рабочий каталог.
 
 Запуск (из корня проекта):
     python tools/build_windows_package.py --out dist/windows
 
 Результат:
-    dist/windows/Phototrichogram/         — сам пакет
+    dist/windows/Phototrichogram/          — сам пакет
     dist/windows/Phototrichogram-win64.zip — он же архивом, для раздачи
+
+Подробности и разбор зависимостей: docs/BUILD_WINDOWS.md
 """
 
 from __future__ import annotations
@@ -463,7 +466,8 @@ def main() -> int:
         return 1
 
     archive = make_zip(package)
-    size_mb = archive.stat().st_size / 1e6
+    # МиБ, а не десятичные МБ: то же число покажет проводник Windows.
+    size_mb = archive.stat().st_size / (1024 * 1024)
     logger.info("")
     logger.info("Готово.")
     logger.info("  каталог: %s", package)

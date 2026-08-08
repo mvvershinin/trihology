@@ -158,16 +158,24 @@ class CameraConfig:
     """Параметры USB-микроскопа.
 
     Attributes:
-        device_index: Индекс устройства V4L2 (/dev/videoN).
+        device_index: Индекс устройства (на Linux — /dev/videoN).
         device_name: Имя последнего выбранного устройства или None. Индексы
-            /dev/videoN могут меняться между перезагрузками, поэтому для
+            устройств могут меняться между перезагрузками, поэтому для
             восстановления выбора устройство ищется сначала по имени, затем
             по индексу.
         width: Запрашиваемая ширина кадра.
         height: Запрашиваемая высота кадра.
         fps: Запрашиваемая частота кадров.
-        video_format: Формат видеопотока (YUYV, MJPG и т.д.).
+        video_format: Кодек видеопотока (FOURCC: MJPG, YUYV и т.д.). Пустая
+            строка — не задавать, оставить как решил драйвер (дефолт: так
+            работало всегда). Задавать осмысленно на Windows, где часть
+            микроскопов на несжатом потоке режет частоту кадров, а на MJPG
+            выдаёт заявленную. См. ``core.camera.Camera.set_video_format``.
         auto_exposure: Автоматическая экспозиция.
+        backend: Способ, которым OpenCV говорит с камерой: 'auto' (по системе),
+            'v4l2' (Linux), 'dshow' / 'msmf' (Windows), 'any'. Дефолт 'auto' —
+            V4L2 на Linux, DirectShow с откатом на MSMF на Windows. Меняется,
+            если конкретный микроскоп не пошёл (см. core/camera.py).
     """
 
     device_index: int = 0
@@ -175,8 +183,9 @@ class CameraConfig:
     width: int = 640
     height: int = 480
     fps: int = 30
-    video_format: str = "YUYV"
+    video_format: str = ""
     auto_exposure: bool = True
+    backend: str = "auto"
 
 
 @dataclass
@@ -286,13 +295,26 @@ def _dict_to_config(data: dict[str, Any]) -> Config:
     )
 
 
+def get_data_dir() -> Path:
+    """Каталог данных приложения: настройки, база, снимки, отчёты, лог.
+
+    Одна папка на всё и на всех системах (``~/.phototrichogram``): на Windows
+    это ``C:\\Users\\Имя\\.phototrichogram``. Единый каталог проще объяснить
+    пользователю и проще целиком скопировать при переносе на другую машину.
+
+    Returns:
+        Path к каталогу данных (может ещё не существовать).
+    """
+    return _DEFAULT_DATA_DIR
+
+
 def get_config_path() -> Path:
     """Путь к файлу конфигурации по умолчанию.
 
     Returns:
         Path к ~/.phototrichogram/config.json
     """
-    return _DEFAULT_DATA_DIR / "config.json"
+    return get_data_dir() / "config.json"
 
 
 def load_config(path: Path | None = None) -> Config:

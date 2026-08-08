@@ -568,7 +568,7 @@ class CaptureTab(ttk.Frame):
         """Обновить список доступных видеоустройств."""
         try:
             from phototrichogram.core.camera import list_devices
-            devices = list_devices()
+            devices = list_devices(backend=self._app.config.camera.backend)
             self._devices = devices
 
             if devices:
@@ -613,11 +613,14 @@ class CaptureTab(ttk.Frame):
         try:
             from phototrichogram.core.camera import Camera
 
+            cam_config = self._app.config.camera
             self._camera = Camera()
-            success = self._camera.open(device.index)
+            success = self._camera.open(device.index, backend=cam_config.backend)
 
             if success:
-                cam_config = self._app.config.camera
+                # Кодек — до разрешения: его смена сбрасывает у части драйверов
+                # уже выставленный размер кадра (см. Camera.set_video_format).
+                self._camera.set_video_format(cam_config.video_format)
                 self._camera.set_resolution(cam_config.width, cam_config.height)
                 self._camera.set_fps(cam_config.fps)
 

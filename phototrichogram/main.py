@@ -6,7 +6,6 @@
 
 import logging
 import sys
-from pathlib import Path
 
 
 def _configure_logging() -> None:
@@ -15,41 +14,77 @@ def _configure_logging() -> None:
 
     Формат: время — уровень — модуль — сообщение.
     Уровень: DEBUG в режиме разработки, INFO в релизе.
-    Лог-файл располагается рядом с домашним каталогом пользователя.
+
+    Лог кладётся в общий каталог данных приложения (``~/.phototrichogram``),
+    рядом с настройками и базой: прежний путь ``~/.local/share/...`` — линуксовое
+    соглашение XDG, на Windows оно превратилось бы в неуместное
+    ``C:\\Users\\Имя\\.local\\share``.
+
+    Вывод в консоль подключается, только если консоль есть. В оконной сборке
+    под Windows у процесса нет стандартного вывода (``sys.stdout is None``), и
+    безусловный ``StreamHandler`` там оказался бы пустышкой.
     """
-    log_dir = Path.home() / ".local" / "share" / "phototrichogram"
+    from phototrichogram.utils.config import get_data_dir
+
+    log_dir = get_data_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "phototrichogram.log"
 
     fmt = "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
 
+    handlers: list[logging.Handler] = [
+        logging.FileHandler(log_file, encoding="utf-8"),
+    ]
+    if sys.stdout is not None:
+        handlers.append(logging.StreamHandler(sys.stdout))
+
     logging.basicConfig(
         level=logging.DEBUG,
         format=fmt,
         datefmt=datefmt,
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
+        handlers=handlers,
     )
 
 
 logger = logging.getLogger(__name__)
 
-_REQUIRED_PACKAGES = {
-    "tkinter": "sudo apt install python3-tk",
-    "PIL": "pip install Pillow   # или: sudo apt install python3-pil python3-pil.imagetk",
+# Подсказки по установке зависят от системы: советовать пользователю Windows
+# команды Debian бессмысленно. В собранном дистрибутиве проверка не сработает
+# никогда (всё лежит внутри), но при запуске из исходников подсказка должна
+# быть выполнимой на той системе, где её прочитали.
+_PIP_HINTS = {
+    "tkinter": "входит в состав Python — переустановите Python с python.org",
+    "PIL": "pip install Pillow",
     "cv2": "pip install opencv-python-headless",
     "numpy": "pip install numpy",
     "matplotlib": "pip install matplotlib",
 }
+_APT_HINTS = {
+    "tkinter": "sudo apt install python3-tk",
+    "PIL": "pip install Pillow   # или: sudo apt install python3-pil python3-pil.imagetk",
+}
+_IMAGETK_HINT_APT = "sudo apt install python3-pil.imagetk"
+_IMAGETK_HINT_PIP = "pip install Pillow"
+
+
+def _install_hints() -> tuple[dict[str, str], str]:
+    """Подсказки по установке пакетов для текущей системы.
+
+    Returns:
+        Кортеж (подсказки по модулям, подсказка для PIL.ImageTk).
+    """
+    if sys.platform == "linux":
+        return {**_PIP_HINTS, **_APT_HINTS}, _IMAGETK_HINT_APT
+    return dict(_PIP_HINTS), _IMAGETK_HINT_PIP
 
 
 def _check_dependencies() -> None:
     """Проверка наличия критических зависимостей с понятными сообщениями."""
+    hints, imagetk_hint = _install_hints()
+
     missing: list[str] = []
-    for module, install_cmd in _REQUIRED_PACKAGES.items():
+    for module, install_cmd in hints.items():
         try:
             __import__(module)
         except ImportError:
@@ -59,9 +94,7 @@ def _check_dependencies() -> None:
     try:
         from PIL import ImageTk  # noqa: F401
     except ImportError:
-        missing.append(
-            "  PIL.ImageTk  → sudo apt install python3-pil.imagetk"
-        )
+        missing.append(f"  PIL.ImageTk  → {imagetk_hint}")
 
     if missing:
         msg = "Не найдены необходимые пакеты:\n" + "\n".join(missing)

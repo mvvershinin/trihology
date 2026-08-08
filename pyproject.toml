@@ -15,6 +15,8 @@ dependencies = [
     "Pillow>=11,<13",
     "matplotlib>=3.9,<4.0",
     "fpdf2>=2.7,<3.0",
+    # Только Windows: имена камер из DirectShow (см. core/camera.py).
+    'pygrabber>=0.2; sys_platform == "win32"',
 ]
 
 [project.optional-dependencies]
@@ -45,6 +47,13 @@ warn_unused_configs = true
 # собственные стабы (py.typed), override для него не нужен.
 [[tool.mypy.overrides]]
 module = ["cv2", "cv2.*"]
+ignore_missing_imports = true
+
+# pygrabber: необязательная зависимость только для Windows (имена камер через
+# DirectShow). На Linux пакета в окружении нет, стабов он не поставляет —
+# импорт в core/camera.py и так обёрнут в try/ImportError.
+[[tool.mypy.overrides]]
+module = ["pygrabber.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

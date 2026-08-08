@@ -10,14 +10,23 @@ dist/phototrichogram/ целиком копируется в AppDir/usr/bin/, а
 старт) и всё равно не даёт «один файл» после сборки в AppImage — AppImage сам
 уже является тем самым единым файлом для конечного пользователя.
 
-Запуск:
-    .venv/bin/pyinstaller build.spec --noconfirm
+Один и тот же spec собирает под Linux и под Windows — различия платформ учтены
+внутри (см. IS_WINDOWS ниже). Кросс-сборки не бывает: PyInstaller упаковывает
+интерпретатор и библиотеки ТОЙ системы, на которой запущен, поэтому exe под
+Windows делается только на Windows.
 
-Результат: dist/phototrichogram/ (каталог) и dist/phototrichogram/phototrichogram
-(исполняемый файл).
+Запуск:
+    Linux:    .venv/bin/pyinstaller build.spec --noconfirm
+    Windows:  .venv\\Scripts\\pyinstaller build.spec --noconfirm
+
+Результат: dist/phototrichogram/ (каталог) и внутри него исполняемый файл
+phototrichogram (Linux) либо phototrichogram.exe (Windows).
 """
 
+import sys
 from pathlib import Path
+
+IS_WINDOWS = sys.platform == "win32"
 
 # Корень репозитория. PyInstaller выполняет .spec-файл функцией exec() с
 # текущим рабочим каталогом = каталог, откуда вызван pyinstaller (см. Quick
@@ -64,6 +73,11 @@ a = Analysis(
     #   try/except (ImportError, AttributeError) с фолбэком на заглушку —
     #   баг обнаруживается только смоук-тестом реального запуска, не по
     #   логам сборки PyInstaller (в них нет предупреждений по этим модулям).
+    #
+    # pygrabber (только Windows) импортируется внутри функции и в try/ImportError
+    # — статический анализ такой импорт не видит. Пакет отдаёт настоящие имена
+    # камер из DirectShow; без него список камер выродится в «Камера 0/1/2» и
+    # перестанет работать запоминание выбранной камеры по имени модели.
     hiddenimports=[
         "phototrichogram.gui.patients_tab",
         "phototrichogram.gui.capture_tab",
@@ -71,7 +85,7 @@ a = Analysis(
         "phototrichogram.gui.multizone_tab",
         "phototrichogram.gui.history_tab",
         "phototrichogram.gui.calibration_tab",
-    ],
+    ] + (["pygrabber.dshow_graph"] if IS_WINDOWS else []),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -118,23 +132,28 @@ exe = EXE(
     # антивирусами/сканерами или системными Tcl/Tk и OpenCV .so. Отключено
     # сознательно, не из-за отсутствия инструмента.
     upx=False,
-    console=True,
-    # Параметр console значим только на Windows/macOS — на Linux исполняемый
-    # файл всегда «консольный» независимо от значения (см. документацию
-    # класса EXE в PyInstaller: "Always True on Linux/Unix — it does not
-    # matter there"). True выбран как честное отражение факта, а не как
-    # включение поведения (которого на Linux и так не отключить).
+    # На Windows окно консоли за окном программы выглядит как ошибка сборки,
+    # поэтому там console=False. Логи от этого не теряются: они пишутся в файл
+    # ~/.phototrichogram/phototrichogram.log, а вывод в консоль подключается
+    # только при её наличии (см. main._configure_logging).
+    #
+    # На Linux параметр значения не имеет — исполняемый файл всегда
+    # «консольный» независимо от значения (документация класса EXE в
+    # PyInstaller: "Always True on Linux/Unix — it does not matter there").
+    # True там — честное отражение факта, а не включение поведения.
+    console=not IS_WINDOWS,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # Тоже значимо только для Windows/macOS (см. EXE.__init__: "Windows and
-    # macOS only"). На Linux ни на что не влияет; путь оставлен настоящим
-    # (не NONE), чтобы значение было валидным при будущей сборке под Windows
-    # с этим же spec-файлом. Для AppImage/.desktop на Linux иконка
-    # используется отдельной копией того же файла — см. build-appimage.sh.
-    icon="assets/icon.png",
+    # Значимо только для Windows/macOS (см. EXE.__init__: "Windows and macOS
+    # only"). Windows требует формат .ico — PNG там даёт либо предупреждение,
+    # либо exe вовсе без иконки, поэтому на Windows берём assets/icon.ico
+    # (собирается из того же PNG скриптом tools/make_windows_icon.py).
+    # На Linux параметр ни на что не влияет; для AppImage/.desktop иконка
+    # берётся отдельной копией PNG — см. build-appimage.sh.
+    icon="assets/icon.ico" if IS_WINDOWS else "assets/icon.png",
 )
 
 coll = COLLECT(

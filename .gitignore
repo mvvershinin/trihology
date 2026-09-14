@@ -46,3 +46,7 @@ htmlcov/
 .claude/settings.json
 .claude/keybindings.json
 .claude/.state/
+
+# Эталонные исследования: реальные данные пациентов, в репозиторий не уезжают
+samples/*
+!samples/README.md

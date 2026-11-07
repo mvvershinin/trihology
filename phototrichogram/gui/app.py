@@ -20,6 +20,7 @@ import numpy as np
 
 from phototrichogram import __version__
 from phototrichogram.data.database import BackupError, Database, RestoreError
+from phototrichogram.data.image_archive import is_image_archive
 from phototrichogram.data.models import Patient
 from phototrichogram.gui.widgets import StatusBar
 
@@ -65,6 +66,7 @@ class App(tk.Tk):
 
         # База данных — один экземпляр на всё приложение
         self._db = Database(Path(self._config.app.db_path))
+        self._config.app.images_dir = str(self._db.image_store.images_dir)
 
         # Активный пациент (выбранный на вкладке «Пациенты»)
         self._active_patient: Patient | None = None
@@ -423,7 +425,7 @@ class App(tk.Tk):
         в диалоге и статусбаре, не прерывая работу приложения.
         """
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        default_name = f"phototrichogram_backup_{timestamp}.db"
+        default_name = f"phototrichogram_backup_{timestamp}.ptg"
 
         reports_dir = self._config.app.reports_dir
         initialdir = (
@@ -431,15 +433,22 @@ class App(tk.Tk):
         )
 
         path = filedialog.asksaveasfilename(
-            title="Резервная копия базы",
-            defaultextension=".db",
+            title="Резервная копия базы и снимков",
+            defaultextension=".ptg",
             initialfile=default_name,
             initialdir=initialdir,
-            filetypes=[("База данных", "*.db"), ("Все файлы", "*.*")],
+            filetypes=[("База и снимки", "*.ptg *.ptgbackup *.zip"),
+                       ("Только база без снимков", "*.db"), ("Все файлы", "*.*")],
         )
         if not path:
             return
 
+        if not is_image_archive(Path(path)) and not messagebox.askyesno(
+            "Копия без снимков",
+            "Выбранный формат содержит только таблицы, без изображений.\n"
+            "Для полного переноса выберите архив .ptg. Сохранить только базу?",
+        ):
+            return
         try:
             self._db.backup_to(Path(path))
         except BackupError as e:
@@ -453,7 +462,7 @@ class App(tk.Tk):
 
         self._status_bar.set_ready(f"Резервная копия сохранена: {path}")
         logger.info("Резервная копия БД сохранена: %s", path)
-        messagebox.showinfo("Резервная копия", f"База сохранена:\n{path}")
+        messagebox.showinfo("Резервная копия", f"Копия сохранена:\n{path}")
 
     def _on_restore_db(self) -> None:
         """Восстановить БД из резервной копии (деструктивная операция).
@@ -482,11 +491,18 @@ class App(tk.Tk):
         path = filedialog.askopenfilename(
             title="Восстановить из копии",
             initialdir=initialdir,
-            filetypes=[("База данных", "*.db"), ("Все файлы", "*.*")],
+            filetypes=[("База и снимки", "*.ptg *.ptgbackup *.zip"),
+                       ("Только база без снимков", "*.db"), ("Все файлы", "*.*")],
         )
         if not path:
             return
 
+        if not is_image_archive(Path(path)) and not messagebox.askyesno(
+            "Восстановление без снимков",
+            "Этот формат копии не содержит изображений. Снимки должны быть "
+            "перенесены отдельно. Восстановить только базу?",
+        ):
+            return
         try:
             self._db.restore_from(Path(path))
         except RestoreError as e:
@@ -518,9 +534,10 @@ class App(tk.Tk):
         self.active_patient = None
         self._reload_db_tabs()
 
-        self._status_bar.set_ready(f"База восстановлена из копии: {path}")
+        self._config.app.images_dir = str(self._db.image_store.images_dir)
+        self._status_bar.set_ready(f"Данные восстановлены из копии: {path}")
         logger.info("БД восстановлена из копии: %s", path)
-        messagebox.showinfo("Восстановление", f"База восстановлена из копии:\n{path}")
+        messagebox.showinfo("Восстановление", f"Данные восстановлены из копии:\n{path}")
 
     def _reload_db_tabs(self) -> None:
         """Перечитать вкладки, читающие БД, после восстановления из копии.
@@ -862,20 +879,11 @@ class _SettingsDialog(tk.Toplevel):
         ).grid(row=2, column=0, sticky="w", padx=5, pady=(3, 0))
 
     def _add_storage(self, parent: ttk.Widget) -> None:
-        """Секция «Хранение»: папки снимков и PDF-отчётов.
+        """Показывает папку снимков рядом с БД и выбор папки PDF-отчётов.
 
-        Два пути только для чтения (Entry ``state="readonly"``) с кнопками
-        «Обзор…» (выбор каталога через ``filedialog.askdirectory``):
-        ``config.app.images_dir`` (автосохранение снимков) и
-        ``config.app.reports_dir`` (стартовая папка диалога «Сохранить отчёт
-        PDF», см. multizone_tab). Значения хранятся в отдельных
-        ``self._images_dir_var`` / ``self._reports_dir_var`` (НЕ в
-        ``self._vars``): generic-цикл ``_load_values`` / ``_on_save`` перебирает
-        секцию ``analysis``, а эти пути лежат в секции ``app`` — их загрузка и
-        сохранение выполняются явно (см. ``_load_values`` и ``_on_save``).
-
-        Args:
-            parent: Родительский фрейм диалога.
+        Папка снимков вычисляется по фактическому файлу базы и не меняется
+        отдельно: перенос выполняется полным архивом .ptg. Папка PDF остаётся
+        настраиваемой стартовой директорией диалога экспорта.
         """
         storage_frame = ttk.LabelFrame(parent, text="Хранение", padding=5)
         storage_frame.pack(fill="x", pady=(0, 10))
@@ -892,12 +900,10 @@ class _SettingsDialog(tk.Toplevel):
             state="readonly",
         )
         self._images_dir_entry.grid(row=1, column=0, sticky="we", padx=5, pady=2)
-        ttk.Button(
-            storage_frame, text="Обзор…", command=self._on_browse_images_dir,
-        ).grid(row=1, column=1, sticky="e", padx=(0, 5), pady=2)
         ttk.Label(
             storage_frame,
-            text="Сюда сохраняются снимки при включённом автосохранении.",
+            text="Снимки обследований хранятся в папке images рядом с базой. "
+                 "Для переноса базы и снимков используйте резервную копию .ptg.",
             font=("", 8),
             foreground="#757575",
             wraplength=420,
@@ -927,26 +933,6 @@ class _SettingsDialog(tk.Toplevel):
             justify="left",
         ).grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=(3, 0))
 
-    def _on_browse_images_dir(self) -> None:
-        """Выбор папки автосохранения снимков через системный диалог.
-
-        Открывает ``askdirectory`` от текущей папки (или домашней, если текущей
-        нет). Выбранный путь пишется в ``self._images_dir_var``; фактическая
-        запись в конфиг и создание каталога происходят при нажатии «Сохранить»
-        (см. ``_on_save``).
-        """
-        current = self._images_dir_var.get().strip()
-        initialdir = current if current and Path(current).is_dir() else str(Path.home())
-        chosen = filedialog.askdirectory(
-            parent=self,
-            title="Выберите папку для снимков",
-            initialdir=initialdir,
-        )
-        if chosen:
-            self._images_dir_var.set(chosen)
-            # Прокрутить поле к концу пути — виден последний (значимый) сегмент.
-            self._images_dir_entry.xview_moveto(1.0)
-
     def _on_browse_reports_dir(self) -> None:
         """Выбор папки для PDF-отчётов через системный диалог.
 
@@ -974,7 +960,7 @@ class _SettingsDialog(tk.Toplevel):
                 var.set(value)
 
         # Папки снимков и отчётов лежат в секции app (не analysis) — отдельно.
-        self._images_dir_var.set(self._config.app.images_dir)
+        self._images_dir_var.set(str(self._parent.db.image_store.images_dir))
         self._reports_dir_var.set(self._config.app.reports_dir)
 
     def _on_save(self) -> None:
@@ -991,14 +977,7 @@ class _SettingsDialog(tk.Toplevel):
                 self._parent.status_bar.set_error("Масштаб (мкм/px) должен быть > 0")
                 return
 
-            # Папка снимков (секция «Хранение» → app.images_dir). Хранится вне
-            # generic-цикла analysis, поэтому пишем явно. Каталог создаётся сразу,
-            # чтобы автосохранение снимков не падало. mkdir может бросить OSError —
-            # он перехватывается общим except ниже.
-            images_dir = self._images_dir_var.get().strip()
-            if images_dir:
-                Path(images_dir).mkdir(parents=True, exist_ok=True)
-                self._config.app.images_dir = images_dir
+            self._config.app.images_dir = str(self._parent.db.image_store.images_dir)
 
             # Папка отчётов (секция app). Создаётся сразу, чтобы диалог
             # сохранения отчёта открывался в существующем каталоге.

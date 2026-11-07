@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,7 +20,7 @@ from numpy.typing import NDArray
 from PIL import Image, ImageTk
 
 if TYPE_CHECKING:
-    pass
+    from phototrichogram.utils.image_storage import ImageStore
 
 logger = logging.getLogger(__name__)
 
@@ -213,15 +214,42 @@ def save_image(image: NDArray[np.uint8], path: Path | str) -> bool:
     """
     path = Path(path)
 
+    temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        pil_image = numpy_to_pil(image)
-        pil_image.save(path)
+        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=path.suffix, delete=False) as f:
+            temporary = Path(f.name)
+        numpy_to_pil(image).save(temporary)
+        if temporary.stat().st_size == 0:
+            raise OSError("Файл изображения пуст")
+        with Image.open(temporary) as written:
+            written.verify()
+        temporary.replace(path)
         logger.info("Изображение сохранено: %s", path)
         return True
     except (OSError, ValueError) as e:
         logger.error("Ошибка сохранения изображения %s: %s", path, e)
         return False
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def save_managed_image(image: NDArray[np.uint8], storage: ImageStore) -> str:
+    """Сохраняет кадр рядом с БД и возвращает переносимую ссылку.
+
+    Временный файл принадлежит этой операции; исходники пользователя не
+    заменяются. Неуспешная запись не образует фиктивной ссылки для БД.
+    """
+    storage.images_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=storage.images_dir, suffix=".png", delete=False) as f:
+        temporary = Path(f.name)
+    try:
+        if not save_image(image, temporary):
+            raise OSError("Не удалось сохранить снимок рядом с базой данных")
+        return storage.import_file(temporary)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def is_image_file(path: Path | str) -> bool:

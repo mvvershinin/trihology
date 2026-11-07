@@ -787,11 +787,12 @@ class MultizoneTab(ttk.Frame):
         for m in measurements:
             if m.id is None:
                 continue
-            paths = [
-                Path(img.annotated_image_path or img.image_path)
-                for img in db.get_measurement_images(m.id)
-                if (img.annotated_image_path or img.image_path)
-            ]
+            paths = []
+            for img in db.get_measurement_images(m.id):
+                path = (db.image_store.resolve(img.annotated_image_path)
+                        or db.image_store.resolve(img.image_path))
+                if path is not None:
+                    paths.append(path)
             if paths:
                 zone_images[m.zone] = paths
 

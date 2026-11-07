@@ -43,6 +43,7 @@ from phototrichogram.data.models import (
     Patient,
     Session,
 )
+from phototrichogram.utils.image_storage import ImageStore
 
 logger = logging.getLogger(__name__)
 
@@ -378,10 +379,15 @@ class Database:
         Args:
             db_path: Путь к файлу SQLite. Будет создан если не существует.
         """
-        self.db_path = db_path
+        self.db_path = Path(db_path).expanduser().resolve()
         self._conn: sqlite3.Connection | None = None
         self._open()
         logger.info("База данных открыта: %s", db_path)
+
+    @property
+    def image_store(self) -> ImageStore:
+        """Хранилище снимков относительно фактического пути БД."""
+        return ImageStore(self.db_path)
 
     def _open(self) -> None:
         """Открытие соединения с self.db_path: директория, PRAGMA, миграции.
@@ -1553,6 +1559,15 @@ class Database:
         ).fetchall()
 
         images = [self._row_to_measurement_image(r) for r in rows]
+        if not images:
+            measurement = self.get_measurement(measurement_id)
+            if measurement is not None and measurement.image_path:
+                images = [MeasurementImage(
+                    id=None, measurement_id=measurement_id,
+                    image_path=measurement.image_path,
+                    annotated_image_path=measurement.annotated_image_path,
+                    ordinal=0, created_at=measurement.created_at,
+                )]
         logger.debug(
             "Снимки измерения id=%d: %d записей", measurement_id, len(images)
         )
@@ -1583,7 +1598,8 @@ class Database:
                 Каждый словарь должен содержать все обязательные поля
                 метода save_measurement() кроме session_id. Необязательные
                 ключи 'n_snapshots' (по умолчанию 1) и 'density_std'
-                (по умолчанию None) — см. save_measurement().
+                (по умолчанию None) — см. save_measurement(). Ключ 'images'
+                содержит снимки серии и записывается в той же транзакции.
             session_zone: Основная зона сессии или None.
             session_notes: Заметки к сессии или None.
 
@@ -1611,7 +1627,7 @@ class Database:
 
                 # 2. Сохраняем все измерения
                 for data in measurements_data:
-                    conn.execute(
+                    measurement_cursor = conn.execute(
                         """
                         INSERT INTO measurements (
                             session_id, zone,
@@ -1663,6 +1679,18 @@ class Database:
                             data.get("density_std"),
                         ),
                     )
+                    for index, item in enumerate(data.get("images", [])):
+                        image_path, annotated_path, ordinal = _normalize_measurement_image_entry(
+                            index, item,
+                        )
+                        conn.execute(
+                            "INSERT INTO measurement_images "
+                            "(measurement_id, image_path, annotated_image_path, "
+                            "ordinal, created_at) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (measurement_cursor.lastrowid, image_path,
+                             annotated_path, ordinal, now),
+                        )
         except sqlite3.Error as exc:
             logger.error(
                 "Ошибка создания сессии с измерениями "
@@ -1722,6 +1750,11 @@ class Database:
                 SQLite и т.п.). Исходное исключение сохраняется как
                 ``__cause__`` (см. ``raise ... from exc``).
         """
+        from phototrichogram.data.image_archive import backup_archive, is_image_archive
+
+        if is_image_archive(dest_path):
+            backup_archive(self, dest_path)
+            return
         # Запрет бэкапа поверх активной БД: два соединения к одному файлу плюс
         # PRAGMA journal_mode=DELETE на живой WAL-БД — неопределённое поведение.
         if dest_path.resolve() == self.db_path.resolve():
@@ -1819,6 +1852,11 @@ class Database:
                 замена файла БД или последующее открытие соединения
                 завершились ошибкой.
         """
+        from phototrichogram.data.image_archive import is_image_archive, restore_archive
+
+        if is_image_archive(src_path):
+            restore_archive(self, src_path)
+            return
         # Запрет восстановления из активной БД: копировался бы только .db без
         # WAL, а его удаление ниже потеряло бы незачекпойнченные данные.
         if src_path.resolve() == self.db_path.resolve():

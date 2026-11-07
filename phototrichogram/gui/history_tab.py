@@ -14,7 +14,9 @@ Layout:
 (персональные нормы активного пациента). Одиночный клик по точке графика
 показывает matplotlib-аннотацию с числовыми показателями измерения (без
 диагнозов); двойной клик по той же точке открывает окно со снимками этого
-измерения (серия до 5 кадров, ImageCanvas с зумом).
+измерения (серия до 5 кадров, ImageCanvas с зумом). Кнопка «Снимки» и
+двойной клик по строке таблицы открывают точное измерение, даже если точки
+нескольких обследований за один день на графике перекрываются.
 
 НЕ импортирует cv2 — чисто GUI-слой (снимки грузятся через PIL/ImageCanvas).
 """
@@ -136,6 +138,7 @@ class HistoryTab(ttk.Frame):
         """
         super().__init__(parent, **kwargs)
         self._app = app
+        self._table_points: dict[str, _PointInfo] = {}
 
         self._create_widgets()
 
@@ -174,6 +177,9 @@ class HistoryTab(ttk.Frame):
             header_frame, text="Обновить", command=self.refresh, width=12,
         )
         self._refresh_btn.grid(row=0, column=2, padx=(5, 0))
+        ttk.Button(
+            header_frame, text="Снимки", command=self._on_show_selected_images,
+        ).grid(row=0, column=3, padx=(5, 0))
 
     def _create_table(self) -> None:
         """Создание таблицы измерений."""
@@ -208,6 +214,8 @@ class HistoryTab(ttk.Frame):
         self._tree.configure(yscrollcommand=tree_scroll.set)
 
         self._tree.grid(row=0, column=0, sticky="nsew")
+        self._tree.bind("<Double-1>", lambda _event: self._on_show_selected_images())
+        self._tree.bind("<Return>", lambda _event: self._on_show_selected_images())
         tree_scroll.grid(row=0, column=1, sticky="ns")
 
         # Плейсхолдер
@@ -325,6 +333,7 @@ class HistoryTab(ttk.Frame):
     def _show_placeholders(self) -> None:
         """Показать плейсхолдеры вместо данных."""
         self._tree.delete(*self._tree.get_children())
+        self._table_points.clear()
         self._table_placeholder.grid()
         self._table_placeholder.lift()
         self._clear_charts()
@@ -345,6 +354,7 @@ class HistoryTab(ttk.Frame):
             session_dates: Маппинг session_id -> дата сессии.
         """
         self._tree.delete(*self._tree.get_children())
+        self._table_points.clear()
 
         if not measurements:
             self._table_placeholder.grid()
@@ -356,7 +366,14 @@ class HistoryTab(ttk.Frame):
 
         for m in measurements:
             date = session_dates.get(m.session_id, m.created_at[:10] if m.created_at else "--")
-            self._tree.insert("", "end", values=(
+            if m.id is None:
+                continue
+            item = str(m.id)
+            self._table_points[item] = _PointInfo(
+                m.zone, date, m.density_per_cm2, m.vellus_pct, m.tv_ratio,
+                m.mean_thickness_um, m.id,
+            )
+            self._tree.insert("", "end", iid=item, values=(
                 date,
                 m.zone,
                 f"{m.density_per_cm2:.0f}",
@@ -640,6 +657,15 @@ class HistoryTab(ttk.Frame):
             self._open_images_window(info)
             return
         self._show_annotation(ax, x_data, y_data, info)
+
+    def _on_show_selected_images(self) -> None:
+        """Открывает снимки выбранной строки, даже при совпадении дат на графике."""
+        selection = self._tree.selection()
+        info = self._table_points.get(selection[0]) if selection else None
+        if info is None:
+            self._app.status_bar.set_text("Выберите измерение в таблице")
+            return
+        self._open_images_window(info)
 
     def _open_images_window(self, info: _PointInfo) -> None:
         """Открыть окно снимков измерения (двойной клик по точке графика).
@@ -925,7 +951,7 @@ class _ImagesWindow(tk.Toplevel):
         holder.grid(row=0, column=index, padx=3)
         holder.bind("<Button-1>", self._make_thumb_handler(index))
 
-        thumb = self._load_thumbnail(Path(img.image_path))
+        thumb = self._load_thumbnail(self._db.image_store.resolve(img.image_path))
         if thumb is None:
             holder.create_text(
                 self._THUMB_SIZE // 2,
@@ -964,7 +990,7 @@ class _ImagesWindow(tk.Toplevel):
 
         return handler
 
-    def _load_thumbnail(self, path: Path) -> Image.Image | None:
+    def _load_thumbnail(self, path: Path | None) -> Image.Image | None:
         """Загрузить снимок и уменьшить до размера миниатюры.
 
         Args:
@@ -973,7 +999,7 @@ class _ImagesWindow(tk.Toplevel):
         Returns:
             PIL-миниатюра или None, если файла нет либо он не читается.
         """
-        if not path.exists():
+        if path is None or not path.is_file():
             logger.warning("Файл снимка не найден (миниатюра): %s", path)
             return None
         try:
@@ -1018,16 +1044,17 @@ class _ImagesWindow(tk.Toplevel):
         img = self._images[self._selected]
 
         if self._show_annotated_var.get() and img.annotated_image_path:
-            path = Path(img.annotated_image_path)
+            reference = img.annotated_image_path
             kind = "размеченный"
         else:
-            path = Path(img.image_path)
+            reference = img.image_path
             kind = "исходный"
 
+        path = self._db.image_store.resolve(reference)
         total = len(self._images)
-        if not path.exists():
+        if path is None:
             self._canvas.clear()
-            self._status_var.set(f"файл не найден: {path}")
+            self._status_var.set(f"Файл снимка не найден: {reference}")
             logger.warning("Файл снимка не найден на диске: %s", path)
             return
 

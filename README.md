@@ -61,13 +61,20 @@ local data folder, independently of the application version or location:
 | Windows | `%USERPROFILE%\.phototrichogram\` (usually `C:\Users\YourName\.phototrichogram\`) |
 
 Contents: `phototrichogram.db` (SQLite patients, examinations, and results),
-`config.json` (settings), `images/` (captures), and `reports/` (default PDF folder).
-Database, image, and report paths can be changed in settings. Data stays on your
+`config.json` (settings), `images/` (originals and annotations), and `reports/`
+(default PDF folder). If a different database path is configured, its managed
+`images/` folder is always beside that actual database. Imported pictures are
+copied there; relative references work after moving the database and images
+together. The report folder can be selected separately. Data stays on your
 computer and is not included in release packages.
 
 A new version therefore opens records created by an earlier version or source
 launch. Replacing or deleting the application package does not delete your data.
-Back up the database using the application before updating. Avoid running
+Before updating, use the application's full `.ptg` backup (database and linked
+original/annotated pictures). The legacy `.db` format contains only the database;
+keep its images separately. Settings and exported PDFs are not in the `.ptg`
+archive. In History, select an examination row and click **Снимки** (Images).
+Avoid running
 multiple copies against the same data folder simultaneously.
 
 For a separate, initially empty profile, set `PHOTOTRICHOGRAM_DATA_DIR` before
@@ -128,7 +135,7 @@ Linux uses the same recipe locally and in CI:
 
 ```bash
 docker run --rm -v "$PWD:/project" -w /project \
-  -e PHOTOTRICHOGRAM_VERSION=1.0.1 ubuntu:22.04 \
+  -e PHOTOTRICHOGRAM_VERSION=1.0.2 ubuntu:22.04 \
   bash tools/build_linux_release.sh
 ```
 
@@ -136,7 +143,7 @@ Native Windows packaging:
 
 ```powershell
 python -m pip install -r requirements-dev.txt -c constraints-release.txt
-python tools/release.py build 1.0.1
+python tools/release.py build 1.0.2
 python tools/release.py windows
 ```
 

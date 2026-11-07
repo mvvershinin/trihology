@@ -12,8 +12,6 @@ from __future__ import annotations
 import logging
 import threading
 import tkinter as tk
-from datetime import datetime
-from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Any
 
@@ -348,17 +346,11 @@ class CalibrationTab(ttk.Frame):
             frame: BGR numpy array снимка калибровочной шкалы.
         """
         try:
-            images_dir = Path(self._app.config.app.images_dir)
-            images_dir.mkdir(parents=True, exist_ok=True)
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = images_dir / f"calibration_{timestamp}.png"
-
-            from phototrichogram.utils.image_utils import save_image
-            save_image(frame, path)
-            logger.debug("Автосохранение снимка шкалы: %s", path)
-        except Exception as e:
+            from phototrichogram.utils.image_utils import save_managed_image
+            save_managed_image(frame, self._app.db.image_store)
+        except (OSError, ValueError) as e:
             logger.error("Ошибка автосохранения снимка шкалы: %s", e)
+            self._app.status_bar.set_error("Не удалось сохранить снимок шкалы")
 
     # ──────────────────────────── Автокалибровка ──────────────────────────────
 

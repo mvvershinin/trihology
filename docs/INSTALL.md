@@ -69,7 +69,10 @@ Patient records, settings, images, and reports are stored outside the program:
 - Linux: `~/.phototrichogram`
 
 Before updating, close the application and use **Файл → Резервная копия базы**
-(File → Database backup). Keep the backup and your images/reports. Extract the
+(File → Database backup). Select the full `.ptg` archive: it includes the database and all linked originals
+and annotations. Legacy `.db` backups contain only the database, so retain their
+`images/` folder separately. Settings and exported PDF reports are not included
+in `.ptg`; preserve them separately. Extract the
 new version into a separate folder; do not overwrite or remove the data folder.
 Keep the old application folder for rollback. If a version changes the database
 schema, rollback may also require restoring a compatible database backup.
@@ -84,3 +87,16 @@ Before using measurements, calibrate your own microscope using a known scale.
 Default calibration values are not a substitute for measuring your setup.
 Reference ranges are explanatory aids, not diagnoses. See the
 [Russian methodology](METHODOLOGY.md) for limitations and protocols.
+
+## Moving a database and opening pictures
+
+Managed pictures live in `images/` beside the actual database file. Copy the
+whole database-plus-images folder, or use the full `.ptg` backup/restore. Moving
+only the `.db` file does not move pictures. Newly imported source files and their
+annotations are copied into managed storage, independently of the application
+folder or working directory. This applies to Windows and Linux.
+
+In **История** (History), select the exact examination row and use **Снимки**
+(Images), double-click that row, or press Enter. This also distinguishes multiple
+examinations on the same day. Old records that never saved a picture cannot
+acquire one automatically; the application must not invent an association.

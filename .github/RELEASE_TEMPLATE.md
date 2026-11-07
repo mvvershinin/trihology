@@ -7,7 +7,8 @@
   Linux-системы отдельно не проверена.
 - `SHA256SUMS` — контрольные суммы, `build-info.json` — версия, ревизия и зависимости.
 
-[Инструкция](https://github.com/mvvershinin/trihology/blob/main/docs/USER_GUIDE.md).
+[Installation (English)](https://github.com/mvvershinin/trihology/blob/main/docs/INSTALL.md) ·
+[Инструкция (русский)](https://github.com/mvvershinin/trihology/blob/main/docs/USER_GUIDE.md).
 Данные хранятся отдельно от программы в `~/.phototrichogram`.
 Перед обновлением закройте приложение и сделайте резервную копию.
 

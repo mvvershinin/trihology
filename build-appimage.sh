@@ -50,7 +50,7 @@ Name=Фототрихограмма
 Comment=Анализ трихоскопических снимков
 Exec=phototrichogram
 Icon=phototrichogram
-Categories=Science;Medical;
+Categories=Science;
 Terminal=false
 EOF
 

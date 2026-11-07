@@ -88,7 +88,7 @@ Linux uses the same recipe locally and in CI:
 
 ```bash
 docker run --rm -v "$PWD:/project" -w /project \
-  -e PHOTOTRICHOGRAM_VERSION=1.0.0 ubuntu:22.04 \
+  -e PHOTOTRICHOGRAM_VERSION=1.0.1 ubuntu:22.04 \
   bash tools/build_linux_release.sh
 ```
 
@@ -96,7 +96,7 @@ Native Windows packaging:
 
 ```powershell
 python -m pip install -r requirements-dev.txt -c constraints-release.txt
-python tools/release.py build 1.0.0
+python tools/release.py build 1.0.1
 python tools/release.py windows
 ```
 

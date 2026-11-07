@@ -79,7 +79,7 @@ python -m phototrichogram
 
 ```bash
 docker run --rm -v "$PWD:/project" -w /project \
-  -e PHOTOTRICHOGRAM_VERSION=1.0.0 ubuntu:22.04 \
+  -e PHOTOTRICHOGRAM_VERSION=1.0.1 ubuntu:22.04 \
   bash tools/build_linux_release.sh
 ```
 

@@ -56,7 +56,7 @@ def build(value: str) -> None:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, target)
     info = {"version": value, "revision": subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        ["git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "python": sys.version, "platform": sys.platform,
         "dependencies": sorted(f"{d.metadata['Name']}=={d.version}"
                                for d in importlib.metadata.distributions())}
@@ -99,7 +99,7 @@ def manifest(directory: Path) -> None:
             {info["revision"] for info in infos.values()}) != 1:
         raise ValueError("Сборки разных версий/ревизий")
     expected_revision = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        ["git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     expected_version = os.environ.get("RELEASE_VERSION")
     for info in infos.values():
         if info["revision"] != expected_revision:

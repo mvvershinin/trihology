@@ -31,7 +31,7 @@ def set_version(value: str) -> None:
                           ("phototrichogram/__init__.py", r'(?m)^__version__ = "[^"]+"')):
         path = ROOT / name
         content, count = re.subn(pattern, lambda match: match[0].split("=")[0]
-                                 + '= "' + value + '"', path.read_text())
+                                 + '= "' + value + '"', path.read_text(encoding="utf-8"))
         if count != 1:
             raise ValueError(f"Не найдена единственная версия: {name}")
         path.write_text(content, encoding="utf-8")
@@ -93,7 +93,8 @@ def manifest(directory: Path) -> None:
             raise ValueError(f"Нет артефакта {name}")
     infos = {}
     for platform in ("linux", "windows"):
-        infos[platform] = json.loads((directory / f"build-info-{platform}.json").read_text())
+        info_path = directory / f"build-info-{platform}.json"
+        infos[platform] = json.loads(info_path.read_text(encoding="utf-8"))
     if len({info["version"] for info in infos.values()}) != 1 or len(
             {info["revision"] for info in infos.values()}) != 1:
         raise ValueError("Сборки разных версий/ревизий")
@@ -116,12 +117,12 @@ def manifest(directory: Path) -> None:
 
 def notes(value: str) -> None:
     """Выводит описание релиза, отказываясь при отсутствии changelog."""
-    text = (ROOT / "CHANGELOG.md").read_text()
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     match = re.search(rf"(?ms)^## {re.escape(value)}\n(.*?)(?=^## |\Z)", text)
     if not match:
         raise ValueError("Нет раздела версии в CHANGELOG.md")
     print(match[1].strip())
-    print("\n" + (ROOT / ".github/RELEASE_TEMPLATE.md").read_text())
+    print("\n" + (ROOT / ".github/RELEASE_TEMPLATE.md").read_text(encoding="utf-8"))
 
 
 def main() -> None:
@@ -131,8 +132,8 @@ def main() -> None:
     parser.add_argument("value", nargs="?")
     args = parser.parse_args()
     if args.command in ("version", "build", "notes"):
-        value = version(args.value or tomllib.loads((ROOT / "pyproject.toml").read_text())
-                        ["project"]["version"])
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        value = version(args.value or project["project"]["version"])
         if args.command == "version":
             print(value)
         elif args.command == "build":

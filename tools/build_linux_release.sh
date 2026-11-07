@@ -9,7 +9,7 @@ gpg --show-keys --with-colons tools/deadsnakes.asc | grep -q 'F23C5A6CF475977595
 cp tools/deadsnakes.asc /usr/share/keyrings/phototrichogram-deadsnakes.asc
 echo 'deb [signed-by=/usr/share/keyrings/phototrichogram-deadsnakes.asc] https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main' > /etc/apt/sources.list.d/phototrichogram-python.list
 apt-get update -qq
-apt-get install -y --no-install-recommends python3.12 python3.12-venv python3.12-tk
+apt-get install -y --no-install-recommends python3.12 libpython3.12 python3.12-venv python3.12-tk
 python3.12 -m venv build/release-venv
 PYTHON=build/release-venv/bin/python
 "$PYTHON" -m pip install -r requirements-dev.txt -c constraints-release.txt

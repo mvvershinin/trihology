@@ -50,6 +50,46 @@ and PDF generation without a physical camera. **Windows operation with a real
 USB microscope has not yet been accepted by the owner.** A successful build
 is not evidence of measurement accuracy or hardware compatibility.
 
+## Data storage and updates
+
+Linux AppImage, Windows ZIP, and source launches share the current OS user's
+local data folder, independently of the application version or location:
+
+| System | Default data folder |
+|---|---|
+| Linux | `~/.phototrichogram/` |
+| Windows | `%USERPROFILE%\.phototrichogram\` (usually `C:\Users\YourName\.phototrichogram\`) |
+
+Contents: `phototrichogram.db` (SQLite patients, examinations, and results),
+`config.json` (settings), `images/` (captures), and `reports/` (default PDF folder).
+Database, image, and report paths can be changed in settings. Data stays on your
+computer and is not included in release packages.
+
+A new version therefore opens records created by an earlier version or source
+launch. Replacing or deleting the application package does not delete your data.
+Back up the database using the application before updating. Avoid running
+multiple copies against the same data folder simultaneously.
+
+For a separate, initially empty profile, set `PHOTOTRICHOGRAM_DATA_DIR` before
+launch. It works for packaged and source launches.
+
+Linux:
+
+```bash
+PHOTOTRICHOGRAM_DATA_DIR="$HOME/.phototrichogram-test" ./Phototrichogram-linux-x86_64.AppImage
+```
+
+Windows PowerShell, from the extracted application folder:
+
+```powershell
+$env:PHOTOTRICHOGRAM_DATA_DIR = "$env:USERPROFILE\.phototrichogram-test"
+.\phototrichogram.exe
+```
+
+The original data remains intact. Reusing the test folder reopens its records;
+choose a new folder for another empty profile. To return to the default profile,
+launch normally from a new terminal without that environment variable.
+
 ## Development
 
 Python 3.11+; tkinter/ttk, OpenCV/NumPy, SQLite, matplotlib, fpdf2.

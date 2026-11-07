@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -22,7 +23,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Директория данных приложения по умолчанию
-_DEFAULT_DATA_DIR = Path.home() / ".phototrichogram"
+_DEFAULT_DATA_DIR = Path(os.environ.get(
+    "PHOTOTRICHOGRAM_DATA_DIR", str(Path.home() / ".phototrichogram"),
+))
 
 
 @dataclass
@@ -345,6 +348,9 @@ def _dict_to_config(data: dict[str, Any]) -> Config:
 
 def get_data_dir() -> Path:
     """Каталог данных приложения: настройки, база, снимки, отчёты, лог.
+
+    Для изолированной проверки поставки PHOTOTRICHOGRAM_DATA_DIR задаётся
+    до импорта этого модуля; обычный запуск использует папку пользователя.
 
     Одна папка на всё и на всех системах (``~/.phototrichogram``): на Windows
     это ``C:\\Users\\Имя\\.phototrichogram``. Единый каталог проще объяснить

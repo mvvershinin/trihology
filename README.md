@@ -1,120 +1,124 @@
-# Фототрихограмма
+# Phototrichogram
 
-Десктопное приложение для трихоскопического анализа волос с USB-микроскопа.
-Замена коммерческого ПО стоимостью 50-150к рублей.
+A Russian-language desktop application for measuring hair characteristics in
+scalp images captured with a USB microscope. It combines image analysis,
+patient records, examination history, and printable reports in one local tool.
 
-## Возможности
+Built for trichoscopy workflows and for evaluating an affordable alternative
+to commercial analysis software. Measurements depend on image quality and
+microscope calibration. The application is an aid for a specialist; it does
+not establish a diagnosis or replace clinical judgement.
 
-- Захват снимков с USB-микроскопа (V4L2)
-- Загрузка снимков из файлов
-- Мультизональный анализ (лобная, теменная, височная, затылочная зоны)
-- Автоматическое определение: плотность волос, толщина, соотношение Terminal/Vellus
-- Сравнение зон с контрольной (затылочной)
-- Профили пациентов, история измерений, графики динамики
-- Автокалибровка по микрометрической шкале
-- Визуализация: аннотированные снимки, гистограммы, сравнительные графики
+**[Download a release](https://github.com/mvvershinin/trihology/releases/latest)** ·
+**[Installation and first launch](docs/INSTALL.md)** ·
+**[Русская документация](README.ru.md)** ·
+**[Руководство пользователя](docs/USER_GUIDE.md)**
 
-## Требования
+## What it does
 
-**Для разработки (Linux):**
+- Captures images from UVC microscopes: V4L2 on Linux; DirectShow/MSMF on Windows.
+- Loads image files and measures hair density, shaft thickness, and the
+  Terminal / Intermediate / Vellus distribution.
+- Analyzes frontal, parietal, temporal, and occipital zones, including comparison
+  with an occipital reference zone.
+- Supports microscope calibration, rooted counting, and averaging image series.
+- Stores patient profiles and examinations in SQLite, with images and history charts.
+- Displays reference ranges selected using patient demographics, with their limitations.
+- Exports PDF reports with Cyrillic fonts and provides database backup/restore.
 
-- Linux (Ubuntu/Debian)
-- Python 3.11+
-- USB-микроскоп (UVC-совместимый)
+All interface text is in Russian. Data is stored locally, outside the application
+folder, in `~/.phototrichogram` (`%USERPROFILE%\.phototrichogram` on Windows).
 
-**Для готового Windows-пакета:** ничего устанавливать не нужно — ни Python, ни
-библиотек, ни SQLite, ни прав администратора. Windows 10/11 64-бит, ~350 МБ на
-диске, UVC-микроскоп (драйвер в Windows встроенный). См.
-[docs/BUILD_WINDOWS.md](docs/BUILD_WINDOWS.md).
+## Download and run
 
-## Установка
+Open [Releases](https://github.com/mvvershinin/trihology/releases/latest), expand
+**Assets**, and download the file for your system. The automatically generated
+“Source code” archives are not runnable application packages.
+
+| System | Download | Launch |
+|---|---|---|
+| Windows 10/11 x64 | `Phototrichogram-win64.zip` | Extract the entire ZIP and run `phototrichogram.exe` |
+| Linux x86_64 | `Phototrichogram-linux-x86_64.AppImage` | Make it executable and run it |
+
+Python, SQLite, and Python libraries do not need to be installed for these packages.
+Releases also include `SHA256SUMS` and `build-info.json`.
+See the [installation guide](docs/INSTALL.md) for first-launch prompts, Linux
+FUSE/camera permissions, verification, updates, and troubleshooting.
+
+Automated package checks exercise the interface, synthetic analysis, SQLite,
+and PDF generation without a physical camera. **Windows operation with a real
+USB microscope has not yet been accepted by the owner.** A successful build
+is not evidence of measurement accuracy or hardware compatibility.
+
+## Development
+
+Python 3.11+; tkinter/ttk, OpenCV/NumPy, SQLite, matplotlib, fpdf2.
+Linux development setup:
 
 ```bash
-# Системные пакеты
-sudo apt install python3-tk python3-pil.imagetk python3.12-venv
-
-# Клонирование
-git clone <url> && cd trihology
-
-# Виртуальное окружение
+sudo apt install python3-venv python3-tk
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Права USB-микроскопа (без sudo при последующих запусках)
-sudo bash install-udev.sh
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m phototrichogram
 ```
 
-## Запуск
+A connected microscope is optional when opening saved images. Calibrate your
+own microscope before relying on measurements; the default scale belongs to
+one particular microscope.
 
 ```bash
-source .venv/bin/activate
-python -m phototrichogram
+.venv/bin/pytest -q
+.venv/bin/ruff check phototrichogram tests tools run_phototrichogram.py
+.venv/bin/mypy phototrichogram
+.venv/bin/lint-imports
 ```
 
-## Использование
+[Architecture](docs/ARCHITECTURE.md), [methodology](docs/METHODOLOGY.md),
+[backlog](docs/todo/BACKLOG.md), and [release plan](docs/todo/2026-11-07_планы-и-github-релизы.md)
+are maintained in Russian. Roadmap stage numbers are not release version numbers.
 
-См. [docs/USER_GUIDE.md](docs/USER_GUIDE.md)
+## Building releases
 
-## Сборка
+A `vX.Y.Z` tag runs checks and builds both platforms before publishing a complete
+GitHub Release. A manual Release workflow run builds trial artifacts without
+publishing. Windows uses native PyInstaller onedir; Linux uses PyInstaller
+and AppImage on an Ubuntu 22.04 base. UPX is disabled.
 
-### Linux
-
-Standalone-дистрибутив (PyInstaller, режим onedir):
+Linux uses the same recipe locally and in CI:
 
 ```bash
-source .venv/bin/activate
-pip install -r requirements-dev.txt   # добавляет pyinstaller
-pyinstaller build.spec --noconfirm
+docker run --rm -v "$PWD:/project" -w /project \
+  -e PHOTOTRICHOGRAM_VERSION=1.0.0 ubuntu:22.04 \
+  bash tools/build_linux_release.sh
 ```
 
-Результат — каталог `dist/phototrichogram/` с исполняемым файлом
-`phototrichogram` и всеми зависимостями рядом (запускать можно только из
-этого каталога, файлы `_internal/` переносить/удалять по отдельности нельзя).
+Native Windows packaging:
 
-AppImage (нужен `appimagetool` в PATH — не устанавливается автоматически):
-```bash
-bash build-appimage.sh
+```powershell
+python -m pip install -r requirements-dev.txt -c constraints-release.txt
+python tools/release.py build 1.0.0
+python tools/release.py windows
 ```
 
-### Windows
+The older Linux-to-Windows runtime packager remains an alternative;
+see [Windows build details](docs/BUILD_WINDOWS.md) in Russian.
 
-Собирается **на Linux**, Windows-машина не нужна:
+## AI-assisted development
 
-```bash
-python tools/build_windows_package.py --out dist/windows
-```
+Original Claude instructions are in `CLAUDE.md` and `.claude/`; they are preserved
+separately from local Codex adapters. The owner's local workspace also has
+`AGENTS.md`, `.codex/agents/`, `.codex/config.toml`, and `.agents/skills/`.
+These adapters are not yet tracked in this repository or included in binaries;
+they do not synchronize automatically with Claude instructions.
 
-Результат — `dist/windows/Phototrichogram-win64.zip` (~122 МБ): распаковал и
-запустил, устанавливать нечего. PyInstaller здесь неприменим — он пакует
-интерпретатор той системы, где запущен; скрипт вместо этого складывает готовые
-Windows-бинарники (Python из conda-forge с tkinter и SQLite + колёса win_amd64).
+In that configured Codex workspace, start Codex from the project root and invoke
+`$orchestrate`, `$develop-cv`, `$develop-gui`, `$develop-db`, `$package`, `$validate`,
+`$review`, or `$test-code` followed by the task. These correspond to the same
+Claude slash commands. `/skills` lists available skills. Models and reasoning
+settings are inherited; Claude model names do not select Codex models. Claude
+hooks and `allowed-tools` are not Codex execution or security settings.
+Full local setup notes are preserved in the [Russian README](README.ru.md).
 
-Подробности, разбор зависимостей и разбор проблем:
-[docs/BUILD_WINDOWS.md](docs/BUILD_WINDOWS.md)
+## License
 
-## Стек
-
-| Компонент | Технология |
-|-----------|-----------|
-| GUI | tkinter (ttk) |
-| CV | OpenCV + NumPy |
-| БД | SQLite3 |
-| Графики | matplotlib |
-| Отчёты | fpdf2 |
-| Сборка | PyInstaller |
-
-## Структура
-
-```
-phototrichogram/
-├── core/           # CV-пайплайн (сегментация, измерение, классификация)
-├── gui/            # tkinter интерфейс (вкладки, виджеты)
-├── data/           # SQLite (модели, CRUD, миграции)
-├── utils/          # Конфигурация, утилиты изображений
-└── reports/        # PDF-отчёты (в разработке)
-```
-
-## Лицензия
-
-MIT
+MIT. Bundled dependencies retain their own licenses.

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from phototrichogram import __version__
 from phototrichogram.data.database import BackupError, Database, RestoreError
 from phototrichogram.data.models import Patient
 from phototrichogram.gui.widgets import StatusBar
@@ -163,7 +164,7 @@ class App(tk.Tk):
 
     def _setup_window(self) -> None:
         """Настройка параметров окна."""
-        self.title("Фототрихограмма v1.0")
+        self.title(f"Фототрихограмма v{__version__}")
 
         width = self._config.app.window_width
         height = self._config.app.window_height
@@ -565,7 +566,7 @@ class App(tk.Tk):
         """Показать окно 'О программе'."""
         messagebox.showinfo(
             "О программе",
-            "Фототрихограмма v1.0\n\n"
+            f"Фототрихограмма v{__version__}\n\n"
             "Десктопное приложение для\n"
             "трихоскопического анализа волос\n"
             "с USB-микроскопа.\n\n"

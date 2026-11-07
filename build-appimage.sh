@@ -64,31 +64,14 @@ fi
 
 echo "AppDir готов: $APPDIR"
 
-if command -v appimagetool >/dev/null 2>&1; then
-    echo "Найден appimagetool — собираю AppImage..."
-    ARCH=x86_64 appimagetool "$APPDIR" "$ROOT_DIR/phototrichogram-x86_64.AppImage"
-    echo "Готово: $ROOT_DIR/phototrichogram-x86_64.AppImage"
-else
-    cat << 'EOF'
-
-appimagetool не найден в PATH — AppImage не собран (сама сборка PyInstaller
-и AppDir выше уже готовы).
-
-Получить appimagetool (без установки в систему, инструмент — просто
-исполняемый файл):
-    wget -O ~/bin/appimagetool \
-        https://github.com/AppImage/appimagetool/releases/latest/download/appimagetool-x86_64.AppImage
-    chmod +x ~/bin/appimagetool
-    # ~/bin должен быть в PATH
-
-Затем повторите:
-    bash build-appimage.sh
-
-Или соберите вручную:
-    ARCH=x86_64 appimagetool build/Phototrichogram.AppDir phototrichogram-x86_64.AppImage
-
-Если appimagetool ругается на отсутствие FUSE (частый случай в контейнерах/
-песочницах без /dev/fuse) — используйте:
-    ARCH=x86_64 appimagetool --appimage-extract-and-run build/Phototrichogram.AppDir ...
-EOF
+APPIMAGETOOL="${APPIMAGETOOL:-appimagetool}"
+if ! command -v "$APPIMAGETOOL" >/dev/null 2>&1; then
+    echo "Ошибка: appimagetool отсутствует; релиз не собран" >&2
+    exit 1
 fi
+ARGS=()
+if [[ -n "${APPIMAGE_RUNTIME:-}" ]]; then
+    ARGS+=(--runtime-file "$APPIMAGE_RUNTIME")
+fi
+mkdir -p "$ROOT_DIR/dist"
+ARCH=x86_64 "$APPIMAGETOOL" "${ARGS[@]}" "$APPDIR" "$ROOT_DIR/dist/Phototrichogram-linux-x86_64.AppImage"

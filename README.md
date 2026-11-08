@@ -29,6 +29,8 @@ not establish a diagnosis or replace clinical judgement.
 All interface text is in Russian. Data is stored locally, outside the application
 folder, in `~/.phototrichogram` (`%USERPROFILE%\.phototrichogram` on Windows).
 
+**[Agent checklist: fresh Windows setup](docs/WINDOWS_SETUP_AGENT.md)** (Russian).
+
 ## Download and run
 
 Open [Releases](https://github.com/mvvershinin/trihology/releases/latest), expand

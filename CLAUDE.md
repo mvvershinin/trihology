@@ -86,6 +86,7 @@
 **Архитектура**: `docs/ARCHITECTURE.md`
 **Задачи**: `docs/todo/BACKLOG.md` (единый трекер; датированные файлы — история)
 **Сборка под Windows**: `docs/BUILD_WINDOWS.md`
+**Настройка готового ZIP на чистой Windows (для агента)**: `docs/WINDOWS_SETUP_AGENT.md`
 **Уроки соседнего проекта**: `docs/WINDOWS_LESSONS.md` — читать перед любой
 работой со сборкой, поставкой, тестами интерфейса и CI
 

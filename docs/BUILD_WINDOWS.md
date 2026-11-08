@@ -5,6 +5,8 @@ Windows runner GitHub Actions. Ниже также сохранён резерв
 рецепт с другим устройством папки. Не смешивайте их команды запуска.
 Текущий статус первого выпуска — в [плане](todo/2026-11-07_планы-и-github-релизы.md).
 
+Развёртывание с пустой базой на целевом ПК: [инструкция агенту](WINDOWS_SETUP_AGENT.md).
+
 ## Готовая программа
 
 Откройте [GitHub Releases](https://github.com/mvvershinin/trihology/releases/latest).
